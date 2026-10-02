@@ -19,7 +19,7 @@ python manifest/manifest.py render PipelineManifest.yaml   # print a manifest wi
 python manifest/manifest.py validate PipelineManifest.yaml
 ```
 
-Checks that the datasets have a `Type`, `DataSchema` and `Topic`, that every profile exists, and that every `DataSchema` is a schema in the configs repo's `schemas/`. Each processor must have a `Repo` and read (`In`) and write (`Out`) existing datasets, and those datasets must carry the schemas declared in the processor's `processor.yaml` at its `Ref`. Processors may not form a cycle. It clones what it needs; `--configs DIR` uses a local checkout instead, and `--no-processors` skips the `processor.yaml` checks. Foundry Studio imports the same `check()`.
+Checks that the datasets have a `Type` and `Topic`, that every profile exists, and that every `DataSchema` is a schema in the configs repo's `schemas/` or `Any`. `Any`, like leaving `DataSchema` out (or `in`/`out` in a `processor.yaml`), means no schema: it matches every processor. Each processor must have a `Repo` and read (`In`) and write (`Out`) existing datasets, and those datasets must carry the schemas declared in the processor's `processor.yaml` at its `Ref`. Processors may not form a cycle. It clones what it needs; `--configs DIR` uses a local checkout instead, and `--no-processors` skips the `processor.yaml` checks. Foundry Studio imports the same `check()`.
 
 A processor declares its schemas in a `processor.yaml` at its `Path` (the repo root by default):
 
