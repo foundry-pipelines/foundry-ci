@@ -3,10 +3,13 @@
 
     manifest.py schema --configs CONFIGS_DIR [-o F]  # generate the manifest JSON Schema for IDEs
     manifest.py render PipelineManifest.yaml         # print the manifest with profiles merged in
+    manifest.py validate PipelineManifest.yaml       # check datasets, schemas and transform wiring
     manifest.py appsettings PipelineManifest.yaml --transform T [-o F]  # appsettings.json for one transform
     manifest.py appsettings PipelineManifest.yaml -o DIR               # DIR/<transform>/appsettings.json for all
 
-render and appsettings clone Configs.Repo at Configs.Ref; pass --configs DIR to use a local checkout.
+render, validate and appsettings clone Configs.Repo at Configs.Ref; pass --configs DIR to use a
+local checkout. validate also reads the schemas in foundry-models (--models DIR for a checkout) and
+each transform's transformer.yaml (its in/out schemas) at the transform's Ref.
 
 A profile is <kind>/<name>.yaml in the configs repo (e.g. kafka/prod.yaml) and a manifest dataset
 refers to it as `Config: kafka/prod`. The manifest's top-level `Configs: {Repo, Ref}` says which
@@ -15,7 +18,8 @@ ConnectionSettings on a dataset override the profile's, key by key. Profiles onl
 connect: every topic already exists and is owned by another authority, so nothing here creates,
 deletes or configures topics.
 
-Deployers can import resolve() rather than shelling out to render.
+Deployers can import resolve() rather than shelling out to render; editors (Foundry Studio) import
+check(), so they and this CLI agree on what a valid pipeline is.
 """
 
 from __future__ import annotations
@@ -32,6 +36,13 @@ from pathlib import Path
 import yaml
 
 DEFAULT_REF = "main"
+MODELS_REPO = "https://gitlab.com/foundry-common/foundry-models.git"
+SCHEMA_DIR = "schemas"  # in foundry-models
+DECL_FILE = "transformer.yaml"  # a transformer's name, in and out schemas, description
+TOP_LEVEL = {"Name", "Configs", "Schemas", "DataSets", "Transforms"}  # Schemas: legacy, ignored
+DATASET_REQUIRED = ("Type", "DataSchema", "Topic")
+TRANSFORM_KEYS = {"Repo", "Ref", "Path", "In", "Out"}
+TRANSFORM_REQUIRED = ("Repo", "In", "Out")
 KINDS = {"kafka": "Kafka"}  # profile directory -> dataset Type it applies to
 PROFILE_RE = re.compile(r"^([a-z0-9-]+)/([a-z0-9][a-z0-9._-]*)$")
 CONNECTION_KEYS = {"Brokers": "string", "SecurityProtocol": "string", "SaslMechanism": "string",
@@ -191,7 +202,7 @@ def apply_profiles(manifest: dict, root: Path) -> dict:
                 errors += [f"DataSets.{name}: {m}" for m in e.errors]
                 continue
             kind = KINDS[ds["Config"].split("/")[0]]
-            if ds.get("Type") != kind:
+            if ds.get("Type") and ds["Type"] != kind:
                 errors.append(f"DataSets.{name}: Config {ds['Config']} is for Type {kind}, "
                               f"not {ds.get('Type')}")
         settings = merge(profile, inline)
@@ -217,6 +228,139 @@ def resolve(manifest_path: Path, configs_dir: Path | None = None) -> dict:
         cfg = manifest["Configs"]
         out["Configs"] = {**cfg, "Ref": cfg.get("Ref", DEFAULT_REF), "Commit": commit}
     return out
+
+
+# --- validating a manifest -----------------------------------------------------------------
+
+def schema_name(stem: str) -> str:
+    """Schema file stem -> schema name, as foundry-models' generator names the type: xml_packets -> XmlPackets."""
+    name = "".join(part[:1].upper() + part[1:] for part in re.split(r"[^A-Za-z0-9]+", stem) if part)
+    return name if name and not name[0].isdigit() else f"_{name}"
+
+
+def schema_names(models_dir: Path) -> set[str]:
+    return {schema_name(p.stem) for p in (models_dir / SCHEMA_DIR).glob("*.yaml")}
+
+
+def read_decl(text: str) -> tuple[str | None, str | None]:
+    """transformer.yaml -> (in, out) schema names."""
+    spec = yaml.safe_load(text) or {}
+    if not isinstance(spec, dict):
+        raise ValueError("not a mapping")
+    return (str(spec["in"]) if spec.get("in") else None, str(spec["out"]) if spec.get("out") else None)
+
+
+def fetch_decls(manifest: dict) -> tuple[dict[str, tuple[str | None, str | None]], list[str]]:
+    """Each transform's (in, out) from transformer.yaml in its Repo at Ref (default branch without one)."""
+    decls, errors, checkouts = {}, [], {}
+    with tempfile.TemporaryDirectory(prefix="foundry-transformers-") as tmp:
+        for name, spec in (manifest.get("Transforms") or {}).items():
+            if not isinstance(spec, dict) or not spec.get("Repo"):
+                continue
+            key = (spec["Repo"], spec.get("Ref") or "HEAD")
+            try:
+                if key not in checkouts:
+                    checkouts[key] = Path(tmp) / str(len(checkouts))
+                    fetch(*key, checkouts[key])
+                path = checkouts[key] / str(spec.get("Path") or "").strip("/") / DECL_FILE
+                decls[name] = read_decl(path.read_text())
+            except ConfigError as e:
+                errors += [f"Transforms.{name}: {m}" for m in e.errors]
+            except FileNotFoundError:
+                errors.append(f"Transforms.{name}: no {DECL_FILE} in {key[0]}@{key[1]}")
+            except (yaml.YAMLError, ValueError) as e:
+                errors.append(f"Transforms.{name}: {DECL_FILE} unreadable ({e})")
+    return decls, errors
+
+
+def cycle(transforms: dict) -> list[str]:
+    """The transforms on a cycle (one feeds another through its Out dataset), sorted."""
+    feeds = {t: {r for r, rs in transforms.items()
+                 if r != t and (s or {}).get("Out") and (s or {}).get("Out") == (rs or {}).get("In")}
+             for t, s in transforms.items()}
+
+    def reaches(start, goal):
+        seen, stack = set(), list(feeds[start])
+        while stack:
+            n = stack.pop()
+            if n == goal:
+                return True
+            if n not in seen:
+                seen.add(n)
+                stack += feeds[n]
+        return False
+
+    return sorted(t for t in transforms if reaches(t, t))
+
+
+def check(manifest: dict, configs_root: Path, schemas: set[str] | None = None,
+          transformers: dict[str, tuple[str | None, str | None]] | None = None) -> dict:
+    """Validate a manifest; return it with profiles merged in, or raise ConfigError with every problem.
+
+    schemas: the schema names DataSchema may use (None: not checked). transformers: each transform's
+    (in, out) schemas from its transformer.yaml (a transform missing here isn't schema-checked).
+    """
+    if not isinstance(manifest, dict):
+        raise ConfigError(["manifest: not a mapping"])
+    errors = [f"{k}: unknown top-level key" for k in manifest if k not in TOP_LEVEL]
+    if not manifest.get("Name"):
+        errors.append("Name: required")
+    datasets = manifest.get("DataSets") or {}
+    transforms = manifest.get("Transforms") or {}
+    resolved = manifest
+    try:
+        resolved = apply_profiles(manifest, configs_root)
+    except ConfigError as e:
+        errors += e.errors
+
+    def carries(ds):
+        # An unknown schema is reported on the dataset, not again on each transform using it.
+        schema = (datasets.get(ds) or {}).get("DataSchema")
+        return schema if schemas is None or schema in schemas else None
+
+    for name, ds in datasets.items():
+        ds = ds or {}
+        errors += [f"DataSets.{name}: missing {k}" for k in DATASET_REQUIRED if not ds.get(k)]
+        if schemas is not None and ds.get("DataSchema") and ds["DataSchema"] not in schemas:
+            errors.append(f"DataSets.{name}.DataSchema: unknown schema {ds['DataSchema']!r} "
+                          f"(known: {', '.join(sorted(schemas)) or 'none'})")
+    for name, spec in transforms.items():
+        spec = spec if isinstance(spec, dict) else {}
+        errors += [f"Transforms.{name}: unknown key {k!r}" for k in spec if k not in TRANSFORM_KEYS]
+        errors += [f"Transforms.{name}: missing {k}" for k in TRANSFORM_REQUIRED if not spec.get(k)]
+        ins, out = spec.get("In"), spec.get("Out")
+        errors += [f"Transforms.{name}.{role}: no dataset {ds!r}"
+                   for role, ds in (("In", ins), ("Out", out)) if ds and ds not in datasets]
+        if ins and ins == out:
+            errors.append(f"Transforms.{name}: reads and writes {ins}")
+        want_in, want_out = (transformers or {}).get(name) or (None, None)
+        if want_in and carries(ins) and carries(ins) != want_in:
+            errors.append(f"Transforms.{name}.In: {ins} carries {carries(ins)} but {name} reads {want_in}")
+        if want_out and carries(out) and carries(out) != want_out:
+            errors.append(f"Transforms.{name}.Out: {name} writes {want_out} but {out} carries {carries(out)}")
+    if looped := cycle(transforms):
+        errors.append(f"Transforms: cycle among {', '.join(looped)}")
+    if errors:
+        raise ConfigError(errors)
+    return resolved
+
+
+def validate(manifest_path: Path, configs_dir: Path | None = None, models_dir: Path | None = None,
+             transformers: bool = True) -> dict:
+    """check() a manifest file, fetching what it needs: configs, foundry-models' schemas, transformer.yaml files."""
+    manifest = yaml.safe_load(manifest_path.read_text()) or {}
+    decls, errors = fetch_decls(manifest) if transformers else ({}, [])
+    with configs_checkout(manifest, configs_dir) as (root, _), tempfile.TemporaryDirectory() as tmp:
+        if models_dir is None:
+            models_dir = Path(tmp)
+            fetch(MODELS_REPO, DEFAULT_REF, models_dir)
+        try:
+            resolved = check(manifest, root, schema_names(models_dir), decls)
+        except ConfigError as e:
+            errors = e.errors + errors
+    if errors:
+        raise ConfigError(errors)
+    return resolved
 
 
 # --- appsettings ----------------------------------------------------------------------------
@@ -259,6 +403,11 @@ def main(argv=None) -> int:
     r = sub.add_parser("render")
     r.add_argument("manifest", type=Path)
     r.add_argument("--configs", type=Path, help="local configs checkout (skips cloning)")
+    v = sub.add_parser("validate")
+    v.add_argument("manifest", type=Path)
+    v.add_argument("--configs", type=Path, help="local configs checkout (skips cloning)")
+    v.add_argument("--models", type=Path, help="local foundry-models checkout (skips cloning)")
+    v.add_argument("--no-transformers", action="store_true", help="don't fetch transformer.yaml files")
     a = sub.add_parser("appsettings")
     a.add_argument("manifest", type=Path)
     a.add_argument("--transform", help="one transform; omit to write all of them under -o DIR")
@@ -276,6 +425,10 @@ def main(argv=None) -> int:
                 sys.stdout.write(text)
         elif args.cmd == "render":
             yaml.safe_dump(resolve(args.manifest, args.configs), sys.stdout, sort_keys=False)
+        elif args.cmd == "validate":
+            m = validate(args.manifest, args.configs, args.models, not args.no_transformers)
+            print(f"ok: {m.get('Name')}: {len(m.get('Transforms') or {})} transforms, "
+                  f"{len(m.get('DataSets') or {})} datasets")
         elif args.cmd == "appsettings":
             resolved = resolve(args.manifest, args.configs)
             if args.transform:
