@@ -6,7 +6,7 @@
     manifest.py validate PipelineManifest.yaml       # check datasets, schemas and processor wiring
     manifest.py appsettings PipelineManifest.yaml --processor T [-o F]  # appsettings.json for one processor
     manifest.py appsettings PipelineManifest.yaml -o DIR               # DIR/<processor>/appsettings.json for all
-    manifest.py k8s PipelineManifest.yaml -o DIR    # DIR/Processors/<processor>/{deployment,configmap}.yaml
+    manifest.py k8s PipelineManifest.yaml -o DIR    # DIR/Processors/<processor>/*.yaml (Deployment, or FlinkDeployment)
 
 render, validate and appsettings clone Configs.Repo at Configs.Ref; pass --configs DIR to use a
 local checkout. validate also reads the schemas (schemas/*.yaml in the same configs repo) and
@@ -43,7 +43,8 @@ DECL_FILE = "processor.yaml"  # a processor's name, in and out schemas, descript
 TOP_LEVEL = {"Name", "Configs", "Schemas", "DataSets", "Processors"}  # Schemas: legacy, ignored
 DATASET_REQUIRED = ("Type", "Topic")
 ANY = "Any"  # DataSchema (or processor.yaml in/out) for "no schema"; also what an omitted one means
-PROCESSOR_KEYS = {"Repo", "Ref", "Path", "In", "Out"}
+PROCESSOR_KEYS = {"Repo", "Ref", "Path", "Runtime", "In", "Out"}
+RUNTIMES = ("dotnet", "flink")  # the first is the default; only flink processors may read several datasets
 PROCESSOR_REQUIRED = ("Repo", "In", "Out")
 KINDS = {"kafka": "Kafka"}  # profile directory -> dataset Type it applies to
 PROFILE_RE = re.compile(r"^([a-z0-9-]+)/([a-z0-9][a-z0-9._-]*)$")
@@ -130,7 +131,9 @@ def manifest_schema(root: Path) -> dict:
                     "Type": {"enum": sorted(KINDS.values())},
                     "Config": {"enum": profile_names(root),
                                "description": "Profile from the configs repo"},
-                    "DataSchema": {"type": "string", "description": f"Schema from the configs repo; {ANY} or omitted: none"},
+                    "DataSchema": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}, "minItems": 1}],
+                                   "description": f"Schema from the configs repo, or a list of them when several processors "
+                                                  f"write different ones here; {ANY} or omitted: none"},
                     "Topic": {"type": "string"},
                     "ConnectionSettings": settings(CONNECTION_KEYS),
                 },
@@ -139,7 +142,9 @@ def manifest_schema(root: Path) -> dict:
                 "type": "object", "required": ["Repo", "In", "Out"], "additionalProperties": False,
                 "properties": {"Repo": {"type": "string"}, "Ref": {"type": "string"},
                                "Path": {"type": "string"},
-                               "In": {"type": "string", "description": "Input dataset"},
+                               "Runtime": {"enum": list(RUNTIMES), "description": f"Defaults to {RUNTIMES[0]}"},
+                               "In": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}, "minItems": 1}],
+                                      "description": "Input dataset (flink: one or more)"},
                                "Out": {"type": "string", "description": "Output dataset"}},
             }},
         },
@@ -244,14 +249,26 @@ def schema_names(configs_root: Path) -> set[str]:
     return {schema_name(p.stem) for p in (configs_root / SCHEMA_DIR).glob("*.yaml")}
 
 
-def read_decl(text: str) -> tuple[str | None, str | None]:
-    """processor.yaml -> (in, out) schema names."""
+def schemas_of(value) -> list[str]:
+    """A DataSchema, or processor.yaml in/out: one name or a list of them, as a list."""
+    return [str(v) for v in value] if isinstance(value, list) else [str(value)] if value else []
+
+
+def inputs_of(spec: dict) -> list[str]:
+    """A processor's In: one dataset or (flink) a list of them, as a list."""
+    value = spec.get("In")
+    return [str(v) for v in value] if isinstance(value, list) else [value] if value else []
+
+
+def read_decl(text: str) -> tuple[str | list[str] | None, str | None]:
+    """processor.yaml -> (in, out) schema names; in may be a list (a processor reading several schemas)."""
     spec = yaml.safe_load(text) or {}
     if not isinstance(spec, dict):
         raise ValueError("not a mapping")
-    def schema(key):  # Any, like no schema, isn't checked
-        return str(spec[key]) if spec.get(key) and spec[key] != ANY else None
-    return schema("in"), schema("out")
+    ins = schemas_of(spec.get("in"))
+    out = spec.get("out")  # Any, like no schema, isn't checked
+    return (None if not ins or ANY in ins else ins if len(ins) > 1 else ins[0],
+            str(out) if out and out != ANY else None)
 
 
 def fetch_decls(manifest: dict) -> tuple[dict[str, tuple[str | None, str | None]], list[str]]:
@@ -280,7 +297,7 @@ def fetch_decls(manifest: dict) -> tuple[dict[str, tuple[str | None, str | None]
 def cycle(processors: dict) -> list[str]:
     """The processors on a cycle (one feeds another through its Out dataset), sorted."""
     feeds = {t: {r for r, rs in processors.items()
-                 if r != t and (s or {}).get("Out") and (s or {}).get("Out") == (rs or {}).get("In")}
+                 if r != t and (s or {}).get("Out") and (s or {}).get("Out") in inputs_of(rs or {})}
              for t, s in processors.items()}
 
     def reaches(start, goal):
@@ -317,32 +334,45 @@ def check(manifest: dict, configs_root: Path, schemas: set[str] | None = None,
     except ConfigError as e:
         errors += e.errors
 
-    def carries(ds):
-        # An unknown schema is reported on the dataset, not again on each processor using it.
-        # Any, or no schema, matches every processor.
-        schema = (datasets.get(ds) or {}).get("DataSchema")
-        return schema if schema != ANY and (schemas is None or schema in schemas) else None
+    def carries(ds) -> list[str] | None:
+        # Any, or no schema, matches every processor; so does a dataset with an unknown schema, which
+        # is reported on the dataset rather than again on each processor using it.
+        carried = schemas_of((datasets.get(ds) or {}).get("DataSchema"))
+        if not carried or ANY in carried or (schemas is not None and not set(carried) <= schemas):
+            return None
+        return sorted(set(carried))
 
     for name, ds in datasets.items():
         ds = ds or {}
         errors += [f"DataSets.{name}: missing {k}" for k in DATASET_REQUIRED if not ds.get(k)]
-        if schemas is not None and ds.get("DataSchema") not in (None, "", ANY, *schemas):
-            errors.append(f"DataSets.{name}.DataSchema: unknown schema {ds['DataSchema']!r} "
-                          f"(known: {ANY}, {', '.join(sorted(schemas))})")
+        if ds.get("DataSchema") == []:
+            errors.append(f"DataSets.{name}.DataSchema: empty list (omit it for no schema)")
+        for schema in schemas_of(ds.get("DataSchema")):
+            if schemas is not None and schema not in (ANY, *schemas):
+                errors.append(f"DataSets.{name}.DataSchema: unknown schema {schema!r} "
+                              f"(known: {ANY}, {', '.join(sorted(schemas))})")
     for name, spec in processors.items():
         spec = spec if isinstance(spec, dict) else {}
         errors += [f"Processors.{name}: unknown key {k!r}" for k in spec if k not in PROCESSOR_KEYS]
         errors += [f"Processors.{name}: missing {k}" for k in PROCESSOR_REQUIRED if not spec.get(k)]
-        ins, out = spec.get("In"), spec.get("Out")
+        runtime = spec.get("Runtime", RUNTIMES[0])
+        if runtime not in RUNTIMES:
+            errors.append(f"Processors.{name}.Runtime: {runtime!r} is not one of {', '.join(RUNTIMES)}")
+        ins, out = inputs_of(spec), spec.get("Out")
+        if isinstance(spec.get("In"), list) and runtime != "flink":
+            errors.append(f"Processors.{name}.In: only flink processors read several datasets")
         errors += [f"Processors.{name}.{role}: no dataset {ds!r}"
-                   for role, ds in (("In", ins), ("Out", out)) if ds and ds not in datasets]
-        if ins and ins == out:
-            errors.append(f"Processors.{name}: reads and writes {ins}")
+                   for role, ds in [*(("In", i) for i in ins), ("Out", out)] if ds and ds not in datasets]
+        if out and out in ins:
+            errors.append(f"Processors.{name}: reads and writes {out}")
+        # A writer's schema must be one the dataset carries; a reader must read every schema its datasets carry.
         want_in, want_out = (declared or {}).get(name) or (None, None)
-        if want_in and carries(ins) and carries(ins) != want_in:
-            errors.append(f"Processors.{name}.In: {ins} carries {carries(ins)} but {name} reads {want_in}")
-        if want_out and carries(out) and carries(out) != want_out:
-            errors.append(f"Processors.{name}.Out: {name} writes {want_out} but {out} carries {carries(out)}")
+        wanted = set(schemas_of(want_in))
+        for ds in ins:
+            if wanted and (carried := carries(ds)) and not set(carried) <= wanted:
+                errors.append(f"Processors.{name}.In: {ds} carries {', '.join(carried)} but {name} reads {', '.join(sorted(wanted))}")
+        if want_out and (carried := carries(out)) and want_out not in carried:
+            errors.append(f"Processors.{name}.Out: {name} writes {want_out} but {out} carries {', '.join(carried)}")
     if looped := cycle(processors):
         errors.append(f"Processors: cycle among {', '.join(looped)}")
     if errors:
@@ -378,16 +408,22 @@ def appsettings(resolved: dict, processor: str) -> dict:
         raise ConfigError([f"no processor {processor!r} (known: {', '.join(processors) or 'none'})"])
     t, datasets = processors[processor], resolved["DataSets"]
 
-    def dataset(role: str) -> dict:
-        name = t.get(role)
+    def dataset(role: str, name: str) -> dict:
         if name not in datasets:
             raise ConfigError([f"Processors.{processor}.{role}: no dataset {name!r}"])
-        return {"DataSet": name, **datasets[name]}
+        out = {"DataSet": name, **datasets[name]}
+        if isinstance(out.get("DataSchema"), list):  # FoundryOptions: DataSchema is one name, DataSchemas all of them
+            out["DataSchemas"] = out.pop("DataSchema")
+        return out
 
     foundry = {"Pipeline": resolved.get("Name"), "Processor": processor}
     if commit := (resolved.get("Configs") or {}).get("Commit"):
         foundry["ConfigsCommit"] = commit
-    foundry["Input"], foundry["Output"] = dataset("In"), dataset("Out")
+    if isinstance(t.get("In"), list):  # flink, reading several datasets
+        foundry["Inputs"] = [dataset("In", n) for n in t["In"]]
+    else:
+        foundry["Input"] = dataset("In", t.get("In"))
+    foundry["Output"] = dataset("Out", t.get("Out"))
     return {"Foundry": foundry}
 
 
@@ -430,19 +466,29 @@ def image_of(spec: dict, commit: str) -> str:
     return f"registry.gitlab.com/{path}:{commit[:8]}"
 
 
+FLINK_VERSION = "v2_2"  # the operator's name for the Flink version the processor CI template builds on
+FLINK_UID = 9999  # the flink user of the official Flink image
+
+
 def k8s(resolved: dict, processor: str, commit: str) -> dict[str, dict]:
-    """deployment.yaml and configmap.yaml for one processor. No namespace: the deployer sets it."""
+    """The Kubernetes files for one processor, by Runtime. No namespace: the deployer sets it."""
     spec = resolved["Processors"][processor]
     name, settings = dns_name(processor), json_text(appsettings(resolved, processor))
     labels = {"app.kubernetes.io/name": name, "app.kubernetes.io/part-of": dns_name(resolved["Name"])}
-    env = [{"name": "DOTNET_ENVIRONMENT", "value": "Production"}]
-    secrets = {(resolved["DataSets"][spec[r]].get("ConnectionSettings") or {}).get("SecretRef") for r in ("In", "Out")}
+    env = []
+    secrets = {(resolved["DataSets"][ds].get("ConnectionSettings") or {}).get("SecretRef")
+               for ds in [*inputs_of(spec), spec["Out"]]}
     for ref in sorted(s for s in secrets if s):
         env += [{"name": f"Secrets__{ref}__{k.capitalize()}",
                  "valueFrom": {"secretKeyRef": {"name": ref, "key": k}}} for k in ("username", "password")]
     configmap = {"apiVersion": "v1", "kind": "ConfigMap",
                  "metadata": {"name": f"{name}-appsettings", "labels": labels},
                  "data": {"appsettings.json": settings}}
+    # A config change alters the pod template, so it rolls out like an image change.
+    annotations = {"foundry/config-hash": hashlib.sha256(settings.encode()).hexdigest()[:16], "foundry/commit": commit}
+    container_security = {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
+    if spec.get("Runtime", RUNTIMES[0]) == "flink":
+        return {"configmap.yaml": configmap, **flink(name, labels, annotations, image_of(spec, commit), env, container_security)}
     deployment = {
         "apiVersion": "apps/v1", "kind": "Deployment",
         "metadata": {"name": name, "labels": labels},
@@ -450,23 +496,71 @@ def k8s(resolved: dict, processor: str, commit: str) -> dict[str, dict]:
             "replicas": 1, "revisionHistoryLimit": 3,
             "selector": {"matchLabels": {"app.kubernetes.io/name": name}},
             "template": {
-                "metadata": {"labels": labels, "annotations": {
-                    # A config change alters the pod template, so it rolls out like an image change.
-                    "foundry/config-hash": hashlib.sha256(settings.encode()).hexdigest()[:16],
-                    "foundry/commit": commit}},
+                "metadata": {"labels": labels, "annotations": annotations},
                 "spec": {
                     "securityContext": {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}},
                     "containers": [{
-                        "name": name, "image": image_of(spec, commit), "env": env,
+                        "name": name, "image": image_of(spec, commit),
+                        "env": [{"name": "DOTNET_ENVIRONMENT", "value": "Production"}, *env],
                         "resources": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"memory": "256Mi"}},
-                        "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
-                                            "capabilities": {"drop": ["ALL"]}},
-                        "volumeMounts": [{"name": "appsettings", "mountPath": "/app/appsettings.json",
+                        "securityContext": {**container_security, "readOnlyRootFilesystem": True},
+                        # Layered over the image's appsettings.json, so the processor's own settings stay.
+                        "volumeMounts": [{"name": "appsettings", "mountPath": "/app/appsettings.Production.json",
                                           "subPath": "appsettings.json", "readOnly": True},
                                          {"name": "tmp", "mountPath": "/tmp"}]}],
                     "volumes": [{"name": "appsettings", "configMap": {"name": f"{name}-appsettings"}},
                                 {"name": "tmp", "emptyDir": {}}]}}}}
     return {"deployment.yaml": deployment, "configmap.yaml": configmap}
+
+
+def flink(name: str, labels: dict, annotations: dict, image: str, env: list, container_security: dict) -> dict[str, dict]:
+    """A FlinkDeployment (Flink Kubernetes Operator) running the job in the image, with its state on a volume.
+
+    Kubernetes HA plus upgradeMode last-state: a new image or config restarts the job from its latest
+    checkpoint, so windows and other state survive deploys. The job reads its datasets from
+    /opt/flink/foundry/appsettings.json, the same Foundry section the .NET processors get.
+    """
+    meta = {"labels": labels}
+    data = f"{name}-state"
+    deployment = {
+        "apiVersion": "flink.apache.org/v1beta1", "kind": "FlinkDeployment",
+        "metadata": {"name": name, **meta, "annotations": annotations},
+        "spec": {
+            "image": image, "flinkVersion": FLINK_VERSION, "serviceAccount": "flink",
+            "flinkConfiguration": {
+                "taskmanager.numberOfTaskSlots": "1",
+                "state.backend.type": "hashmap",
+                "execution.checkpointing.interval": "30s",
+                "execution.checkpointing.dir": "file:///flink-data/checkpoints",
+                "execution.checkpointing.savepoint-dir": "file:///flink-data/savepoints",
+                "high-availability.type": "kubernetes",
+                "high-availability.storageDir": "file:///flink-data/ha",
+            },
+            "podTemplate": {"metadata": {"annotations": annotations}, "spec": {
+                "securityContext": {"runAsNonRoot": True, "runAsUser": FLINK_UID, "runAsGroup": FLINK_UID,
+                                    "fsGroup": FLINK_UID, "seccompProfile": {"type": "RuntimeDefault"}},
+                "containers": [{
+                    "name": "flink-main-container", "env": env, "securityContext": container_security,
+                    "volumeMounts": [{"name": "state", "mountPath": "/flink-data"},
+                                     {"name": "appsettings", "mountPath": "/opt/flink/foundry", "readOnly": True}]}],
+                "volumes": [{"name": "state", "persistentVolumeClaim": {"claimName": data}},
+                            {"name": "appsettings", "configMap": {"name": f"{name}-appsettings"}}]}},
+            "jobManager": {"resource": {"memory": "1024m", "cpu": 0.5}},
+            "taskManager": {"resource": {"memory": "1536m", "cpu": 0.5}},
+            "job": {"jarURI": "local:///opt/flink/usrlib/job.jar", "parallelism": 1, "upgradeMode": "last-state"},
+        }}
+    pvc = {"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": data, **meta},
+           "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "1Gi"}}}}
+    # The JobManager starts its TaskManagers and keeps HA metadata in ConfigMaps.
+    account = {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": "flink", **meta}}
+    role = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": {"name": "flink", **meta},
+            "rules": [{"apiGroups": [""], "resources": ["pods", "configmaps"], "verbs": ["*"]},
+                      {"apiGroups": ["apps"], "resources": ["deployments", "deployments/finalizers"], "verbs": ["*"]}]}
+    binding = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": {"name": "flink", **meta},
+               "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "flink"},
+               "subjects": [{"kind": "ServiceAccount", "name": "flink"}]}
+    return {"flinkdeployment.yaml": deployment, "pvc.yaml": pvc,
+            "serviceaccount.yaml": account, "role.yaml": role, "rolebinding.yaml": binding}
 
 
 def main(argv=None) -> int:
