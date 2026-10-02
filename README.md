@@ -37,7 +37,7 @@ python manifest/manifest.py appsettings PipelineManifest.yaml --processor Isp -o
 python manifest/manifest.py appsettings PipelineManifest.yaml -o out/   # out/<processor>/appsettings.json, one per processor
 ```
 
-Writes a `Foundry` section with the pipeline and processor names and the processor's `In` and `Out` datasets (topic, schema and connection settings, profiles merged in). It binds to `FoundryOptions` from the [Foundry.Common.Models](https://gitlab.com/foundry-platform/common/foundry-common) package, whose `EnsureSchemas<TIn, TOut>()` checks the datasets carry the schemas the processor was built for. Accepts `--configs DIR` like `render`.
+Writes a `Foundry` section with the pipeline and processor names and the processor's `In` and `Out` datasets (topic, schema and connection settings, profiles merged in). `k8s` mounts it as a .NET processor's `appsettings.Production.json`, over the `appsettings.json` its build generated from `config.yaml` ([Foundry.Common.Configuration](https://gitlab.com/foundry-platform/common/foundry-common)); a processor reads `Foundry:Input` and `Foundry:Output`.
 
 ### IDE autocomplete
 

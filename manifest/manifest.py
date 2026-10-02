@@ -399,9 +399,8 @@ def validate(manifest_path: Path, configs_dir: Path | None = None, processors: b
 def appsettings(resolved: dict, processor: str) -> dict:
     """The appsettings.json for one processor of a resolve()d manifest.
 
-    Its "Foundry" section binds to Foundry.Common.Models.Configuration.FoundryOptions (foundry-common):
-    the pipeline and processor names plus the In and Out datasets, each with its connection
-    profile merged in.
+    Its "Foundry" section: the pipeline and processor names plus the In and Out datasets, each with its
+    connection profile merged in; processors read Foundry:Input and Foundry:Output from it.
     """
     processors = resolved.get("Processors") or {}
     if processor not in processors:
@@ -412,7 +411,7 @@ def appsettings(resolved: dict, processor: str) -> dict:
         if name not in datasets:
             raise ConfigError([f"Processors.{processor}.{role}: no dataset {name!r}"])
         out = {"DataSet": name, **datasets[name]}
-        if isinstance(out.get("DataSchema"), list):  # FoundryOptions: DataSchema is one name, DataSchemas all of them
+        if isinstance(out.get("DataSchema"), list):  # DataSchema stays one name; DataSchemas lists a union
             out["DataSchemas"] = out.pop("DataSchema")
         return out
 
