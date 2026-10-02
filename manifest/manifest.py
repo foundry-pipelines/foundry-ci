@@ -8,7 +8,7 @@
     manifest.py appsettings PipelineManifest.yaml -o DIR               # DIR/<transform>/appsettings.json for all
 
 render, validate and appsettings clone Configs.Repo at Configs.Ref; pass --configs DIR to use a
-local checkout. validate also reads the schemas in foundry-models (--models DIR for a checkout) and
+local checkout. validate also reads the schemas (schemas/*.yaml in the same configs repo) and
 each transform's transformer.yaml (its in/out schemas) at the transform's Ref.
 
 A profile is <kind>/<name>.yaml in the configs repo (e.g. kafka/prod.yaml) and a manifest dataset
@@ -36,8 +36,7 @@ from pathlib import Path
 import yaml
 
 DEFAULT_REF = "main"
-MODELS_REPO = "https://gitlab.com/foundry-common/foundry-models.git"
-SCHEMA_DIR = "schemas"  # in foundry-models
+SCHEMA_DIR = "schemas"  # in the configs repo
 DECL_FILE = "transformer.yaml"  # a transformer's name, in and out schemas, description
 TOP_LEVEL = {"Name", "Configs", "Schemas", "DataSets", "Transforms"}  # Schemas: legacy, ignored
 DATASET_REQUIRED = ("Type", "DataSchema", "Topic")
@@ -238,8 +237,8 @@ def schema_name(stem: str) -> str:
     return name if name and not name[0].isdigit() else f"_{name}"
 
 
-def schema_names(models_dir: Path) -> set[str]:
-    return {schema_name(p.stem) for p in (models_dir / SCHEMA_DIR).glob("*.yaml")}
+def schema_names(configs_root: Path) -> set[str]:
+    return {schema_name(p.stem) for p in (configs_root / SCHEMA_DIR).glob("*.yaml")}
 
 
 def read_decl(text: str) -> tuple[str | None, str | None]:
@@ -345,17 +344,13 @@ def check(manifest: dict, configs_root: Path, schemas: set[str] | None = None,
     return resolved
 
 
-def validate(manifest_path: Path, configs_dir: Path | None = None, models_dir: Path | None = None,
-             transformers: bool = True) -> dict:
-    """check() a manifest file, fetching what it needs: configs, foundry-models' schemas, transformer.yaml files."""
+def validate(manifest_path: Path, configs_dir: Path | None = None, transformers: bool = True) -> dict:
+    """check() a manifest file, fetching what it needs: configs (profiles and schemas), transformer.yaml files."""
     manifest = yaml.safe_load(manifest_path.read_text()) or {}
     decls, errors = fetch_decls(manifest) if transformers else ({}, [])
-    with configs_checkout(manifest, configs_dir) as (root, _), tempfile.TemporaryDirectory() as tmp:
-        if models_dir is None:
-            models_dir = Path(tmp)
-            fetch(MODELS_REPO, DEFAULT_REF, models_dir)
+    with configs_checkout(manifest, configs_dir) as (root, _):
         try:
-            resolved = check(manifest, root, schema_names(models_dir), decls)
+            resolved = check(manifest, root, schema_names(root), decls)
         except ConfigError as e:
             errors = e.errors + errors
     if errors:
@@ -406,7 +401,6 @@ def main(argv=None) -> int:
     v = sub.add_parser("validate")
     v.add_argument("manifest", type=Path)
     v.add_argument("--configs", type=Path, help="local configs checkout (skips cloning)")
-    v.add_argument("--models", type=Path, help="local foundry-models checkout (skips cloning)")
     v.add_argument("--no-transformers", action="store_true", help="don't fetch transformer.yaml files")
     a = sub.add_parser("appsettings")
     a.add_argument("manifest", type=Path)
@@ -426,7 +420,7 @@ def main(argv=None) -> int:
         elif args.cmd == "render":
             yaml.safe_dump(resolve(args.manifest, args.configs), sys.stdout, sort_keys=False)
         elif args.cmd == "validate":
-            m = validate(args.manifest, args.configs, args.models, not args.no_transformers)
+            m = validate(args.manifest, args.configs, not args.no_transformers)
             print(f"ok: {m.get('Name')}: {len(m.get('Transforms') or {})} transforms, "
                   f"{len(m.get('DataSets') or {})} datasets")
         elif args.cmd == "appsettings":

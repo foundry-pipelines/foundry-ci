@@ -19,7 +19,7 @@ python manifest/manifest.py render PipelineManifest.yaml   # print a manifest wi
 python manifest/manifest.py validate PipelineManifest.yaml
 ```
 
-Checks that the datasets have a `Type`, `DataSchema` and `Topic`, that every profile exists, and that every `DataSchema` is a schema in [foundry-models](https://gitlab.com/foundry-common/foundry-models). Each transform must have a `Repo` and read (`In`) and write (`Out`) existing datasets, and those datasets must carry the schemas declared in the transformer's `transformer.yaml` at its `Ref`. Transforms may not form a cycle. It clones what it needs; `--configs DIR` and `--models DIR` use local checkouts instead, and `--no-transformers` skips the `transformer.yaml` checks. Foundry Studio imports the same `check()`.
+Checks that the datasets have a `Type`, `DataSchema` and `Topic`, that every profile exists, and that every `DataSchema` is a schema in the configs repo's `schemas/`. Each transform must have a `Repo` and read (`In`) and write (`Out`) existing datasets, and those datasets must carry the schemas declared in the transformer's `transformer.yaml` at its `Ref`. Transforms may not form a cycle. It clones what it needs; `--configs DIR` uses a local checkout instead, and `--no-transformers` skips the `transformer.yaml` checks. Foundry Studio imports the same `check()`.
 
 A transformer declares its schemas in a `transformer.yaml` at its `Path` (the repo root by default):
 
