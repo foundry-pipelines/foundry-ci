@@ -6,6 +6,7 @@
     manifest.py validate PipelineManifest.yaml       # check datasets, schemas and processor wiring
     manifest.py appsettings PipelineManifest.yaml --processor T [-o F]  # appsettings.json for one processor
     manifest.py appsettings PipelineManifest.yaml -o DIR               # DIR/<processor>/appsettings.json for all
+    manifest.py k8s PipelineManifest.yaml -o DIR    # DIR/Processors/<processor>/{deployment,configmap}.yaml
 
 render, validate and appsettings clone Configs.Repo at Configs.Ref; pass --configs DIR to use a
 local checkout. validate also reads the schemas (schemas/*.yaml in the same configs repo) and
@@ -25,6 +26,7 @@ check(), so they and this CLI agree on what a valid pipeline is.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -389,6 +391,80 @@ def json_text(data: dict) -> str:
     return json.dumps(data, indent=2) + "\n"
 
 
+# --- kubernetes -----------------------------------------------------------------------------
+
+class K8sDumper(yaml.SafeDumper):
+    """Plain YAML for humans: multi-line strings as | blocks, no &anchors."""
+    def ignore_aliases(self, data):
+        return True
+
+
+K8sDumper.add_representer(str, lambda d, s: d.represent_scalar(
+    "tag:yaml.org,2002:str", s, style="|" if "\n" in s else None))
+
+
+def dns_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def commit_of(repo: str, ref: str) -> str:
+    """The commit ref points at in repo (tags peeled)."""
+    out = subprocess.run(["git", "ls-remote", repo, ref, f"{ref}^{{}}"], capture_output=True, text=True)
+    lines = [l.split("\t") for l in out.stdout.splitlines() if l]
+    if out.returncode or not lines:
+        raise ConfigError([f"{repo}: no ref {ref!r}"])
+    peeled = [sha for sha, name in lines if name.endswith("^{}")]
+    return (peeled or [lines[0][0]])[0]
+
+
+def image_of(spec: dict, commit: str) -> str:
+    """registry.gitlab.com/<project>[/<path>]:<short sha>, as the processor CI template pushes it."""
+    m = re.match(r"^https://gitlab\.com/(.+?)(\.git)?$", spec["Repo"])
+    if not m:
+        raise ConfigError([f"{spec['Repo']}: can only derive images for gitlab.com repos"])
+    path = "/".join(dns_name(p) for p in (m.group(1) + "/" + spec.get("Path", "")).strip("/").split("/"))
+    return f"registry.gitlab.com/{path}:{commit[:8]}"
+
+
+def k8s(resolved: dict, processor: str, commit: str) -> dict[str, dict]:
+    """deployment.yaml and configmap.yaml for one processor. No namespace: the deployer sets it."""
+    spec = resolved["Processors"][processor]
+    name, settings = dns_name(processor), json_text(appsettings(resolved, processor))
+    labels = {"app.kubernetes.io/name": name, "app.kubernetes.io/part-of": dns_name(resolved["Name"])}
+    env = [{"name": "DOTNET_ENVIRONMENT", "value": "Production"}]
+    secrets = {(resolved["DataSets"][spec[r]].get("ConnectionSettings") or {}).get("SecretRef") for r in ("In", "Out")}
+    for ref in sorted(s for s in secrets if s):
+        env += [{"name": f"Secrets__{ref}__{k.capitalize()}",
+                 "valueFrom": {"secretKeyRef": {"name": ref, "key": k}}} for k in ("username", "password")]
+    configmap = {"apiVersion": "v1", "kind": "ConfigMap",
+                 "metadata": {"name": f"{name}-appsettings", "labels": labels},
+                 "data": {"appsettings.json": settings}}
+    deployment = {
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": name, "labels": labels},
+        "spec": {
+            "replicas": 1, "revisionHistoryLimit": 3,
+            "selector": {"matchLabels": {"app.kubernetes.io/name": name}},
+            "template": {
+                "metadata": {"labels": labels, "annotations": {
+                    # A config change alters the pod template, so it rolls out like an image change.
+                    "foundry/config-hash": hashlib.sha256(settings.encode()).hexdigest()[:16],
+                    "foundry/commit": commit}},
+                "spec": {
+                    "securityContext": {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}},
+                    "containers": [{
+                        "name": name, "image": image_of(spec, commit), "env": env,
+                        "resources": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"memory": "256Mi"}},
+                        "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+                                            "capabilities": {"drop": ["ALL"]}},
+                        "volumeMounts": [{"name": "appsettings", "mountPath": "/app/appsettings.json",
+                                          "subPath": "appsettings.json", "readOnly": True},
+                                         {"name": "tmp", "mountPath": "/tmp"}]}],
+                    "volumes": [{"name": "appsettings", "configMap": {"name": f"{name}-appsettings"}},
+                                {"name": "tmp", "emptyDir": {}}]}}}}
+    return {"deployment.yaml": deployment, "configmap.yaml": configmap}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -407,6 +483,10 @@ def main(argv=None) -> int:
     a.add_argument("--processor", help="one processor; omit to write all of them under -o DIR")
     a.add_argument("-o", "--output", type=Path, help="file (with --processor) or directory (without)")
     a.add_argument("--configs", type=Path, help="local configs checkout (skips cloning)")
+    k = sub.add_parser("k8s")
+    k.add_argument("manifest", type=Path)
+    k.add_argument("-o", "--output", type=Path, required=True, help="directory")
+    k.add_argument("--configs", type=Path, help="local configs checkout (skips cloning)")
     args = p.parse_args(argv)
     if args.cmd == "appsettings" and not args.processor and not args.output:
         p.error("appsettings: pass --processor, or -o DIR to write every processor")
@@ -438,6 +518,17 @@ def main(argv=None) -> int:
                     (args.output / t).mkdir(parents=True, exist_ok=True)
                     (args.output / t / "appsettings.json").write_text(text)
                     print(f"wrote {args.output / t / 'appsettings.json'}", file=sys.stderr)
+        elif args.cmd == "k8s":
+            resolved = validate(args.manifest, args.configs)
+            files = {}
+            for t, spec in (resolved.get("Processors") or {}).items():
+                commit = commit_of(spec["Repo"], spec.get("Ref", DEFAULT_REF))
+                for f, obj in k8s(resolved, t, commit).items():
+                    files[args.output / "Processors" / t / f] = yaml.dump(obj, Dumper=K8sDumper, sort_keys=False)
+            for path, text in files.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+                print(f"wrote {path}", file=sys.stderr)
     except ConfigError as e:
         for msg in e.errors:
             print(f"error: {msg}", file=sys.stderr)

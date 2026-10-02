@@ -1,0 +1,33 @@
+# Processor repos include this:
+#
+#   include:
+#     - project: foundry-platform/common/scripts
+#       file: ci/processor.yml
+#
+# Builds the processor's arm64 image with the .NET SDK (no Docker needed) and pushes it as
+# $CI_REGISTRY_IMAGE[/<PROCESSOR_PATH>]:$CI_COMMIT_SHORT_SHA, the image manifest.py k8s points at,
+# then re-renders the pipelines so ones following this branch pick it up.
+variables:
+  PROCESSOR_PATH: ""  # the processor's folder, in a repo holding several
+
+image:
+  stage: build
+  image: mcr.microsoft.com/dotnet/sdk:8.0
+  variables:
+    SDK_CONTAINER_REGISTRY_UNAME: $CI_REGISTRY_USER
+    SDK_CONTAINER_REGISTRY_PWORD: $CI_REGISTRY_PASSWORD
+  script:
+    - SUFFIX=$(echo "$PROCESSOR_PATH" | tr 'A-Z' 'a-z' | sed -E 's#[^a-z0-9/]+#-#g; s#^/+|/+$##g')
+    - REPOSITORY=${CI_PROJECT_PATH,,}${SUFFIX:+/$SUFFIX}
+    - >
+      dotnet publish "${PROCESSOR_PATH:-.}" -c Release -r linux-arm64 --self-contained false
+      -t:PublishContainer -p:EnableSdkContainerSupport=true -p:ContainerUser=1654
+      -p:ContainerRegistry=$CI_REGISTRY -p:ContainerRepository=$REPOSITORY -p:ContainerImageTags=$CI_COMMIT_SHORT_SHA
+
+render:
+  stage: deploy
+  needs: [image]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  trigger:
+    project: foundry-platform/foundry-pipelines
