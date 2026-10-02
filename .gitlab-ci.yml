@@ -1,4 +1,4 @@
-# Runs on every push to main here and on every push to main in foundry-common/configs (triggered
+# Runs on every push to main here and on every push to main in foundry-platform/common/configs (triggered
 # from there): publishes the manifest IDE schema as this job's artifact.
 schema:
   image: python:3.12  # not -slim: needs git
@@ -6,7 +6,7 @@ schema:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
     - pip install --quiet pyyaml
-    - git clone --quiet --depth 1 https://gitlab.com/foundry-common/configs.git /tmp/configs
+    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/configs.git /tmp/configs
     - python manifest/manifest.py schema --configs /tmp/configs -o manifest.schema.json
   artifacts:
     paths: [manifest.schema.json]
