@@ -232,7 +232,7 @@ def resolve(manifest_path: Path, configs_dir: Path | None = None) -> dict:
 # --- validating a manifest -----------------------------------------------------------------
 
 def schema_name(stem: str) -> str:
-    """Schema file stem -> schema name, as foundry-models' generator names the type: xml_packets -> XmlPackets."""
+    """Schema file stem -> schema name, as foundry-common's generator names the type: xml_packets -> XmlPackets."""
     name = "".join(part[:1].upper() + part[1:] for part in re.split(r"[^A-Za-z0-9]+", stem) if part)
     return name if name and not name[0].isdigit() else f"_{name}"
 
@@ -363,7 +363,7 @@ def validate(manifest_path: Path, configs_dir: Path | None = None, transformers:
 def appsettings(resolved: dict, transform: str) -> dict:
     """The appsettings.json for one transform of a resolve()d manifest.
 
-    Its "Foundry" section binds to Foundry.Models.Configuration.FoundryOptions (foundry-models):
+    Its "Foundry" section binds to Foundry.Common.Models.Configuration.FoundryOptions (foundry-common):
     the pipeline and transform names plus the In and Out datasets, each with its connection
     profile merged in.
     """
