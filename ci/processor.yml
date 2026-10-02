@@ -27,6 +27,8 @@ build-image:
 render:
   stage: deploy
   needs: [build-image]
+  inherit:
+    variables: false  # foundry-pipelines doesn't accept pipeline variables
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   trigger:
