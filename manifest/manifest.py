@@ -12,7 +12,7 @@ render, validate and appsettings clone Configs.Repo at Configs.Ref; pass --confi
 local checkout. validate also reads the schemas (schemas/*.yaml in the same configs repo) and
 each processor's processor.yaml (its in/out schemas) at the processor's Ref.
 
-A profile is <kind>/<name>.yaml in the configs repo (e.g. kafka/prod.yaml) and a manifest dataset
+A profile is <kind>/<name>.json in the configs repo (e.g. kafka/prod.json) and a manifest dataset
 refers to it as `Config: kafka/prod`. The manifest's top-level `Configs: {Repo, Ref}` says which
 repo and ref to read profiles from; Ref is optional and defaults to main. Inline
 ConnectionSettings on a dataset override the profile's, key by key. Profiles only say how to
@@ -64,7 +64,7 @@ class ConfigError(Exception):
 # --- profiles -------------------------------------------------------------------------------
 
 def profile_names(root: Path) -> list[str]:
-    return sorted(f"{kind}/{p.stem}" for kind in KINDS for p in (root / kind).glob("*.yaml"))
+    return sorted(f"{kind}/{p.stem}" for kind in KINDS for p in (root / kind).glob("*.json"))
 
 
 def check_settings(where: str, data: dict, errors: list[str]) -> None:
@@ -86,11 +86,14 @@ def check_settings(where: str, data: dict, errors: list[str]) -> None:
 def load_profile(root: Path, name: str) -> dict:
     if not PROFILE_RE.match(name) or name.split("/")[0] not in KINDS:
         raise ConfigError([f"Config {name!r} is not <{'|'.join(KINDS)}>/<name>"])
-    path = root / f"{name}.yaml"
+    path = root / f"{name}.json"
     if not path.is_file():
         known = ", ".join(profile_names(root)) or "none"
         raise ConfigError([f"Config {name!r} not found (known: {known})"])
-    data = yaml.safe_load(path.read_text()) or {}
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise ConfigError([f"{name}: not JSON ({e})"])
     if not isinstance(data, dict):
         raise ConfigError([f"{name}: must be a mapping"])
     errors: list[str] = []
