@@ -3,8 +3,10 @@
 
     manifest.py schema --configs CONFIGS_DIR [-o F]  # generate the manifest JSON Schema for IDEs
     manifest.py render PipelineManifest.yaml         # print the manifest with profiles merged in
+    manifest.py appsettings PipelineManifest.yaml --transform T [-o F]  # appsettings.json for one transform
+    manifest.py appsettings PipelineManifest.yaml -o DIR               # DIR/<transform>/appsettings.json for all
 
-render clones Configs.Repo at Configs.Ref; pass --configs DIR to use a local checkout.
+render and appsettings clone Configs.Repo at Configs.Ref; pass --configs DIR to use a local checkout.
 
 A profile is <kind>/<name>.yaml in the configs repo (e.g. kafka/prod.yaml) and a manifest dataset
 refers to it as `Config: kafka/prod`. The manifest's top-level `Configs: {Repo, Ref}` says which
@@ -217,6 +219,37 @@ def resolve(manifest_path: Path, configs_dir: Path | None = None) -> dict:
     return out
 
 
+# --- appsettings ----------------------------------------------------------------------------
+
+def appsettings(resolved: dict, transform: str) -> dict:
+    """The appsettings.json for one transform of a resolve()d manifest.
+
+    Its "Foundry" section binds to Foundry.Models.Configuration.FoundryOptions (foundry-models):
+    the pipeline and transform names plus the In and Out datasets, each with its connection
+    profile merged in.
+    """
+    transforms = resolved.get("Transforms") or {}
+    if transform not in transforms:
+        raise ConfigError([f"no transform {transform!r} (known: {', '.join(transforms) or 'none'})"])
+    t, datasets = transforms[transform], resolved["DataSets"]
+
+    def dataset(role: str) -> dict:
+        name = t.get(role)
+        if name not in datasets:
+            raise ConfigError([f"Transforms.{transform}.{role}: no dataset {name!r}"])
+        return {"DataSet": name, **datasets[name]}
+
+    foundry = {"Pipeline": resolved.get("Name"), "Transform": transform}
+    if commit := (resolved.get("Configs") or {}).get("Commit"):
+        foundry["ConfigsCommit"] = commit
+    foundry["Input"], foundry["Output"] = dataset("In"), dataset("Out")
+    return {"Foundry": foundry}
+
+
+def json_text(data: dict) -> str:
+    return json.dumps(data, indent=2) + "\n"
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -226,7 +259,14 @@ def main(argv=None) -> int:
     r = sub.add_parser("render")
     r.add_argument("manifest", type=Path)
     r.add_argument("--configs", type=Path, help="local configs checkout (skips cloning)")
+    a = sub.add_parser("appsettings")
+    a.add_argument("manifest", type=Path)
+    a.add_argument("--transform", help="one transform; omit to write all of them under -o DIR")
+    a.add_argument("-o", "--output", type=Path, help="file (with --transform) or directory (without)")
+    a.add_argument("--configs", type=Path, help="local configs checkout (skips cloning)")
     args = p.parse_args(argv)
+    if args.cmd == "appsettings" and not args.transform and not args.output:
+        p.error("appsettings: pass --transform, or -o DIR to write every transform")
     try:
         if args.cmd == "schema":
             text = schema_text(args.configs)
@@ -236,6 +276,21 @@ def main(argv=None) -> int:
                 sys.stdout.write(text)
         elif args.cmd == "render":
             yaml.safe_dump(resolve(args.manifest, args.configs), sys.stdout, sort_keys=False)
+        elif args.cmd == "appsettings":
+            resolved = resolve(args.manifest, args.configs)
+            if args.transform:
+                text = json_text(appsettings(resolved, args.transform))
+                if args.output:
+                    args.output.write_text(text)
+                else:
+                    sys.stdout.write(text)
+            else:
+                # Build them all before writing any, so an error leaves no partial output.
+                files = {t: json_text(appsettings(resolved, t)) for t in resolved.get("Transforms") or {}}
+                for t, text in files.items():
+                    (args.output / t).mkdir(parents=True, exist_ok=True)
+                    (args.output / t / "appsettings.json").write_text(text)
+                    print(f"wrote {args.output / t / 'appsettings.json'}", file=sys.stderr)
     except ConfigError as e:
         for msg in e.errors:
             print(f"error: {msg}", file=sys.stderr)

@@ -13,6 +13,15 @@ python manifest/manifest.py render PipelineManifest.yaml   # print a manifest wi
 
 `render` clones `Configs.Repo` at `Configs.Ref`; add `--configs DIR` to use a local checkout.
 
+### appsettings.json for transformers
+
+```sh
+python manifest/manifest.py appsettings PipelineManifest.yaml --transform Isp -o appsettings.json
+python manifest/manifest.py appsettings PipelineManifest.yaml -o out/   # out/<transform>/appsettings.json, one per transform
+```
+
+Writes a `Foundry` section with the pipeline and transform names and the transform's `In` and `Out` datasets (topic, schema and connection settings, profiles merged in). It binds to `FoundryOptions` from the [Foundry.Models](https://gitlab.com/foundry-common/foundry-models) package, whose `EnsureSchemas<TIn, TOut>()` checks the datasets carry the schemas the transformer was built for. Accepts `--configs DIR` like `render`.
+
 ### IDE autocomplete
 
 Every push to `main` here or in `configs` regenerates the schema, so `Config:` autocompletes the current profiles. Put this at the top of a `PipelineManifest.yaml` (YAML extension in VS Code, or JetBrains):
