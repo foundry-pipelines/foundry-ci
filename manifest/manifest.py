@@ -41,7 +41,8 @@ DEFAULT_REF = "main"
 SCHEMA_DIR = "schemas"  # in the configs repo
 DECL_FILE = "processor.yaml"  # a processor's name, in and out schemas, description
 TOP_LEVEL = {"Name", "Configs", "Schemas", "DataSets", "Processors"}  # Schemas: legacy, ignored
-DATASET_REQUIRED = ("Type", "DataSchema", "Topic")
+DATASET_REQUIRED = ("Type", "Topic")
+ANY = "Any"  # DataSchema (or processor.yaml in/out) for "no schema"; also what an omitted one means
 PROCESSOR_KEYS = {"Repo", "Ref", "Path", "In", "Out"}
 PROCESSOR_REQUIRED = ("Repo", "In", "Out")
 KINDS = {"kafka": "Kafka"}  # profile directory -> dataset Type it applies to
@@ -123,13 +124,13 @@ def manifest_schema(root: Path) -> dict:
             },
             "Schemas": {"type": "object", "additionalProperties": {"type": "string"}},
             "DataSets": {"type": "object", "additionalProperties": {
-                "type": "object", "required": ["Type", "DataSchema", "Topic"],
+                "type": "object", "required": ["Type", "Topic"],
                 "additionalProperties": False,
                 "properties": {
                     "Type": {"enum": sorted(KINDS.values())},
                     "Config": {"enum": profile_names(root),
                                "description": "Profile from the configs repo"},
-                    "DataSchema": {"type": "string"},
+                    "DataSchema": {"type": "string", "description": f"Schema from the configs repo; {ANY} or omitted: none"},
                     "Topic": {"type": "string"},
                     "ConnectionSettings": settings(CONNECTION_KEYS),
                 },
@@ -248,7 +249,9 @@ def read_decl(text: str) -> tuple[str | None, str | None]:
     spec = yaml.safe_load(text) or {}
     if not isinstance(spec, dict):
         raise ValueError("not a mapping")
-    return (str(spec["in"]) if spec.get("in") else None, str(spec["out"]) if spec.get("out") else None)
+    def schema(key):  # Any, like no schema, isn't checked
+        return str(spec[key]) if spec.get(key) and spec[key] != ANY else None
+    return schema("in"), schema("out")
 
 
 def fetch_decls(manifest: dict) -> tuple[dict[str, tuple[str | None, str | None]], list[str]]:
@@ -316,15 +319,16 @@ def check(manifest: dict, configs_root: Path, schemas: set[str] | None = None,
 
     def carries(ds):
         # An unknown schema is reported on the dataset, not again on each processor using it.
+        # Any, or no schema, matches every processor.
         schema = (datasets.get(ds) or {}).get("DataSchema")
-        return schema if schemas is None or schema in schemas else None
+        return schema if schema != ANY and (schemas is None or schema in schemas) else None
 
     for name, ds in datasets.items():
         ds = ds or {}
         errors += [f"DataSets.{name}: missing {k}" for k in DATASET_REQUIRED if not ds.get(k)]
-        if schemas is not None and ds.get("DataSchema") and ds["DataSchema"] not in schemas:
+        if schemas is not None and ds.get("DataSchema") not in (None, "", ANY, *schemas):
             errors.append(f"DataSets.{name}.DataSchema: unknown schema {ds['DataSchema']!r} "
-                          f"(known: {', '.join(sorted(schemas)) or 'none'})")
+                          f"(known: {ANY}, {', '.join(sorted(schemas))})")
     for name, spec in processors.items():
         spec = spec if isinstance(spec, dict) else {}
         errors += [f"Processors.{name}: unknown key {k!r}" for k in spec if k not in PROCESSOR_KEYS]
