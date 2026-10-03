@@ -1,11 +1,11 @@
 // Writes OUT_DIR/<Type>.json, the JSON Schema of each operator.yaml type (in or out) the operator's assembly
-// declares: its output types, and input types it owns because they arrive via Input (not gen-types' classes in
-// <namespace>.Contracts.In, of types other operators own). Same System.Text.Json
+// declares: its output types, and input types it owns because they arrive via Input (not ModelGenerator's classes in
+// <namespace>.Models.In, of types other operators own). Same System.Text.Json
 // settings the operators serialize with (the defaults, plus the types' own attributes).
 //
-// With a schemaRegistry checkout, types it marks ignoreSchema: true are skipped.
+// With a schema-registry checkout, types it marks ignoreSchema: true are skipped.
 //
-//     dotnet run --project schema/SchemaGen -- OPERATOR_DLL OPERATOR_YAML OUT_DIR [SCHEMA_REGISTRY_DIR]
+//     dotnet run --project operator/schema/SchemaGen -- OPERATOR_DLL OPERATOR_YAML OUT_DIR [SCHEMA_REGISTRY_DIR]
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text.Json;
@@ -45,10 +45,10 @@ foreach (var name in names)
 {
     if (registry is not null && IgnoresSchema(Path.Combine(registry, name, "metadata.yaml")))
     {
-        Console.WriteLine($"skip: {name}: ignoreSchema in schemaRegistry");
+        Console.WriteLine($"skip: {name}: ignoreSchema in schema-registry");
         continue;
     }
-    var matches = types.Where(t => t.Name == name && t.Namespace?.EndsWith(".Contracts.In") != true).ToArray();
+    var matches = types.Where(t => t.Name == name && t.Namespace?.EndsWith(".Models.In") != true).ToArray();
     if (matches.Length > 1)
     {
         Console.Error.WriteLine($"error: {name}: several classes named so ({string.Join(", ", matches.Select(t => t.FullName))})");

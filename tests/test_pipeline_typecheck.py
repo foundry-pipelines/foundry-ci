@@ -3,7 +3,7 @@ import json
 import pytest
 from conftest import load
 
-typecheck = load("validators/pipelines/typecheck.py")
+typecheck = load("pipeline/validate/typecheck.py")
 
 REGISTERED = {"XmlPackets", "Packets", "DecodeEnrichment", "EnrichedPackets"}
 
@@ -48,8 +48,8 @@ def test_config_missing_from_config_registry(profiles):
 
 def test_allowed_type_not_registered(profiles):
     errors = typecheck.check(manifest(), DECLS, REGISTERED - {"Packets"}, profiles)
-    assert "Kafkas.Mid.AllowedTypes: 'Packets' is not in schemaRegistry" in errors
-    assert "Convert: 'Packets' is not in schemaRegistry" in errors
+    assert "Kafkas.Mid.AllowedTypes: 'Packets' is not in schema-registry" in errors
+    assert "Convert: 'Packets' is not in schema-registry" in errors
 
 
 def test_output_type_not_allowed_by_its_kafka(profiles):

@@ -7,8 +7,8 @@ from pipeline import SchemaRegistry, breaking_changes
 
 PACKETS = {"type": "object", "required": ["guid"],
            "properties": {"guid": {"type": "string", "format": "guid"}, "data": {"type": "string"}}}
-OWNER = "foundry-platform/operators/xmltojsonprocessor"
-SCRIPT = Path(__file__).resolve().parents[1] / "schema/registry.py"
+OWNER = "foundry-platform/example-operators/xml-parser"
+SCRIPT = Path(__file__).resolve().parents[1] / "operator/schema/registry.py"
 
 
 def with_props(**props):

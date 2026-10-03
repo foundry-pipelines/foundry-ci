@@ -1,5 +1,5 @@
-"""Shared by the validators and deploy/render.py: reading PipelineManifest.yaml and operator.yaml files,
-fetching repos, the connection profiles in configRegistry, and the type schemas in schemaRegistry.
+"""Shared by the validators and pipeline/deploy/render.py: reading PipelineManifest.yaml and operator.yaml files,
+fetching repos, the connection profiles in config-registry, and the type schemas in schema-registry.
 
 A manifest:
 
@@ -18,7 +18,7 @@ A operator.yaml (at the processor's Path, the repo root by default):
     name: Decode
     description: Decodes the base64 payload.
     Runtime: dotnet                                 # dotnet | flink
-    in: [Packets]                                   # type names: types in schemaRegistry
+    in: [Packets]                                   # type names: types in schema-registry
     out: [DecodeEnrichment]                         # classes of this operator, which registers them
 """
 
@@ -45,10 +45,10 @@ RUNTIMES = ("dotnet", "flink")
 CONNECTION_KEYS = {"Brokers", "SecurityProtocol", "SaslMechanism", "SecretRef"}
 PROFILE_RE = re.compile(r"^kafka/[a-z0-9][a-z0-9._-]*$")
 GITLAB_URL = (os.environ.get("CI_SERVER_URL") or os.environ.get("GITLAB_URL") or "https://gitlab.com").rstrip("/")
-SCHEMA_REGISTRY_REPO = f"{GITLAB_URL}/foundry-platform/common/schemaRegistry.git"
+SCHEMA_REGISTRY_REPO = f"{GITLAB_URL}/foundry-platform/registries/schema-registry.git"
 PROJECT_PATH_RE = re.compile(r"^[\w.-]+(/[\w.-]+)+$")
 META_FILE = "metadata.yaml"
-GENERATED_DIR = ("Contracts", "In")  # gen-types' classes of input types other operators own
+GENERATED_DIR = ("Models", "In")  # ModelGenerator's classes of input types other operators own
 CLASS_RE = re.compile(r"^\s*(?:(?:public|internal|sealed|abstract|static|partial|final)\s+)*(?:class|record|struct)\s+([A-Za-z_]\w*)", re.M)
 
 
@@ -178,7 +178,7 @@ def processor_decls(manifest: dict) -> tuple[dict[str, dict], dict[str, str], li
 
 def declared_classes(root: Path, patterns: tuple[str, ...] = ("*.cs", "*.java")) -> set[str]:
     """Class, record and struct names declared in the C# and Java files under root: the project's own,
-    so not gen-types' Contracts/In/."""
+    so not ModelGenerator's Models/In/."""
     names = set()
     for f in (f for pattern in patterns for f in root.rglob(pattern)):
         parts = f.relative_to(root).parts
@@ -188,7 +188,7 @@ def declared_classes(root: Path, patterns: tuple[str, ...] = ("*.cs", "*.java"))
 
 
 class SchemaRegistry:
-    """The schemaRegistry repo. A type is a folder <TypeName>/ with a metadata.yaml: owner, the operator that
+    """The schema-registry repo. A type is a folder <TypeName>/ with a metadata.yaml: owner, the operator that
     owns and alone publishes it (its repo name, plus /<PROCESSOR_PATH> if set), and ignoreSchema: true for a
     type without a JSON Schema (no generation, no breaking-change check; names and wiring are still checked).
     Other types have v1.json..v<N>.json, their schema versions."""

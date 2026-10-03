@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Type-checks a pipeline: its Kafkas, Processors and Flow, against each processor's operator.yaml.
 
-    python validators/pipelines/typecheck.py PipelineManifest.yaml... [--schema-registry DIR] [--config-registry DIR]
+    python pipeline/validate/typecheck.py PipelineManifest.yaml... [--schema-registry DIR] [--config-registry DIR]
 
 - Kafkas have a Config, Topic and AllowedTypes; Input and Output exist. Each Config is a profile in
-  configRegistry (at the manifest's Ref, or --config-registry). AllowedTypes and processors' in/out
-  types have schemas in schemaRegistry (cloned at main, or --schema-registry).
+  config-registry (at the manifest's Ref, or --config-registry). AllowedTypes and processors' in/out
+  types have schemas in schema-registry (cloned at main, or --schema-registry).
 - ConfigRegistry has a Repo and a Ref; processors have a Repo and an operator.yaml at Ref.
 - Flow connects a Kafka to a processor or a processor to a Kafka, between things the manifest defines,
   and everything it defines is connected. Nothing writes Input.
@@ -20,14 +20,14 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared"))
 from pipeline import (DEFAULT_REF, KAFKA_KEYS, MANDATORY_KAFKAS, MANIFEST_KEYS, PROCESSOR_KEYS,  # noqa: E402
                       ConfigError, checkout, flow, load_manifest, load_profile, processor_decls, run,
                       schema_registry, section, types_of)
 
 
 def check(manifest: dict, decls: dict[str, dict], registered: set[str], profiles: Path | None = None) -> list[str]:
-    """profiles: a configRegistry checkout to find each Kafka's Config in; None skips that check."""
+    """profiles: a config-registry checkout to find each Kafka's Config in; None skips that check."""
     errors = [f"{k}: unknown top-level key" for k in manifest if k not in MANIFEST_KEYS]
     if not manifest.get("Name"):
         errors.append("Name: required")
@@ -45,7 +45,7 @@ def check(manifest: dict, decls: dict[str, dict], registered: set[str], profiles
         types = types_of(spec.get("AllowedTypes"))
         if spec.get("AllowedTypes") and not types:
             errors.append(f"Kafkas.{name}.AllowedTypes: must be a list of type names, e.g. [Packets]")
-        errors += [f"Kafkas.{name}.AllowedTypes: {t!r} is not in schemaRegistry"
+        errors += [f"Kafkas.{name}.AllowedTypes: {t!r} is not in schema-registry"
                    for t in types if t not in registered]
         if profiles is not None and spec.get("Config"):
             try:
@@ -86,7 +86,7 @@ def check(manifest: dict, decls: dict[str, dict], registered: set[str], profiles
         if decl is None:
             continue  # no operator.yaml: reported by processor_decls
         ins, outs = set(types_of(decl.get("in"))), set(types_of(decl.get("out")))
-        errors += [f"{name}: {t!r} is not in schemaRegistry" for t in sorted(ins | outs) if t not in registered]
+        errors += [f"{name}: {t!r} is not in schema-registry" for t in sorted(ins | outs) if t not in registered]
         if not reads[name]:
             errors.append(f"{name}: reads no Kafka")
         if decl.get("Runtime", "dotnet") == "dotnet" and len(reads[name]) > 1:
@@ -114,7 +114,7 @@ def check(manifest: dict, decls: dict[str, dict], registered: set[str], profiles
 
 
 def with_profiles(manifest: dict, local: Path | None, fn) -> list[str]:
-    """fn(configRegistry checkout): local, or the manifest's Repo at Ref."""
+    """fn(config-registry checkout): local, or the manifest's Repo at Ref."""
     if local is not None:
         return fn(local)
     registry = section(manifest, "ConfigRegistry")
@@ -130,8 +130,8 @@ def with_profiles(manifest: dict, local: Path | None, fn) -> list[str]:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("manifests", type=Path, nargs="+")
-    p.add_argument("--schema-registry", type=Path, help="local schemaRegistry checkout (default: clone it)")
-    p.add_argument("--config-registry", type=Path, help="local configRegistry checkout (default: clone the manifest's)")
+    p.add_argument("--schema-registry", type=Path, help="local schema-registry checkout (default: clone it)")
+    p.add_argument("--config-registry", type=Path, help="local config-registry checkout (default: clone the manifest's)")
     args = p.parse_args()
     with schema_registry(args.schema_registry) as registry:
         registered = registry.types()

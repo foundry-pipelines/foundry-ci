@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Fails when a pipeline's Flow has a cycle, e.g. A -> K1 -> B -> K2 -> A.
 
-    python validators/pipelines/cycles.py PipelineManifest.yaml...
+    python pipeline/validate/cycles.py PipelineManifest.yaml...
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared"))
 from pipeline import ConfigError, flow, load_manifest, run  # noqa: E402
 
 

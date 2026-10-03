@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Checks or publishes the JSON Schemas in DIR (<Type>.json, from schema/SchemaGen or a Maven operator's
-jsonschema-maven-plugin) against a schemaRegistry checkout (<Type>/metadata.yaml, <Type>/v<N>.json).
+"""Checks or publishes the JSON Schemas in DIR (<Type>.json, from operator/schema/SchemaGen or a Maven operator's
+jsonschema-maven-plugin) against a schema-registry checkout (<Type>/metadata.yaml, <Type>/v<N>.json).
 
-    python schema/registry.py check DIR --owner OPERATOR --registry SCHEMA_REGISTRY_DIR
-    python schema/registry.py publish DIR --owner OPERATOR --registry SCHEMA_REGISTRY_DIR
+    python operator/schema/registry.py check DIR --owner OPERATOR --registry SCHEMA_REGISTRY_DIR
+    python operator/schema/registry.py publish DIR --owner OPERATOR --registry SCHEMA_REGISTRY_DIR
 
 Both fail if OPERATOR (its repo name, plus /<PROCESSOR_PATH> if set) isn't a type's owner, or a schema
 breaks its latest version. publish then writes each changed schema as its type's next version; the caller
@@ -16,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared"))
 from pipeline import ConfigError, SchemaRegistry, run  # noqa: E402
 
 
@@ -25,7 +25,7 @@ def main():
     p.add_argument("action", choices=["check", "publish"])
     p.add_argument("dir", type=Path)
     p.add_argument("--owner", required=True)
-    p.add_argument("--registry", type=Path, required=True, help="schemaRegistry checkout")
+    p.add_argument("--registry", type=Path, required=True, help="schema-registry checkout")
     args = p.parse_args()
     registry = SchemaRegistry(args.registry)
     schemas = {f.stem: json.loads(f.read_text()) for f in sorted(args.dir.glob("*.json"))}

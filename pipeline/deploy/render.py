@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Renders a pipeline's Kubernetes files: one folder per processor under DIR/Processors/.
 
-    python deploy/render.py PipelineManifest.yaml -o DIR [--registry CONFIG_REGISTRY_DIR] [--image-registry HOST]
+    python pipeline/deploy/render.py PipelineManifest.yaml -o DIR [--registry CONFIG_REGISTRY_DIR] [--image-registry HOST]
 
 Run the validators first: this only reports what stops it from rendering. Each processor gets a
 ConfigMap with its appsettings.json (a Foundry section: the pipeline and processor names and the
 Kafkas it reads and writes, profiles from ConfigRegistry merged in) and, by the Runtime in its
 operator.yaml, a Deployment (dotnet) or a FlinkDeployment (flink). Images are
-<image registry>/<project>[/<path>]:<short sha of Ref>, as ci/processor.yml and ci/flink.yml push them; the
+<image registry>/<project>[/<path>]:<short sha of Ref>, as operator/ci/dotnet.yml and operator/ci/flink.yml push them; the
 image registry is the GitLab's container registry ($CI_REGISTRY in CI).
 """
 
@@ -23,11 +23,11 @@ from pathlib import Path
 
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared"))
 from pipeline import (ConfigError, checkout, flow, load_manifest, load_profile, processor_decls,  # noqa: E402
                       repo_url, run, section)
 
-FLINK_VERSION = "v2_2"  # the operator's name for the Flink version ci/flink.yml builds on
+FLINK_VERSION = "v2_2"  # the operator's name for the Flink version operator/ci/flink.yml builds on
 FLINK_UID = 9999  # the flink user of the official Flink image
 
 
@@ -201,7 +201,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("manifest", type=Path)
     p.add_argument("-o", "--output", type=Path, required=True, help="directory")
-    p.add_argument("--registry", type=Path, help="local configRegistry checkout (default: clone ConfigRegistry.Repo at Ref)")
+    p.add_argument("--registry", type=Path, help="local config-registry checkout (default: clone ConfigRegistry.Repo at Ref)")
     p.add_argument("--image-registry", default=os.environ.get("CI_REGISTRY"),
                    help="container registry the images are in (default: $CI_REGISTRY)")
     args = p.parse_args()

@@ -2,7 +2,7 @@ import pytest
 from conftest import load
 from pipeline import ConfigError
 
-typecheck = load("validators/processors/typecheck.py")
+typecheck = load("operator/validate/typecheck.py")
 
 POM = """<project xmlns="http://maven.apache.org/POM/4.0.0"><build><plugins>
   <plugin><artifactId>maven-shade-plugin</artifactId></plugin>
@@ -29,7 +29,7 @@ def test_in_types_own_or_registered():
     assert typecheck.check(decl, {"XmlPackets", "Packets"}, set()) == []
     decl = {"in": ["Mystery"], "out": ["Packets"]}
     assert typecheck.check(decl, {"Packets"}, {"Packets"}) == [
-        "operator.yaml in: 'Mystery' is neither a class of this project nor in schemaRegistry"]
+        "operator.yaml in: 'Mystery' is neither a class of this project nor in schema-registry"]
 
 
 def test_pom_matches_out_types(tmp_path):
@@ -66,8 +66,8 @@ def test_declared_classes_reads_java_and_skips_target(tmp_path):
     (tmp_path / "src/EnrichedPackets.java").write_text("public record EnrichedPackets(String guid) {}")
     (tmp_path / "target").mkdir()
     (tmp_path / "target/Gen.java").write_text("public class Gen {}")
-    (tmp_path / "Contracts/In").mkdir(parents=True)
-    (tmp_path / "Contracts/In/Packets.cs").write_text("public partial class Packets {}")  # gen-types': not its own
+    (tmp_path / "Models/In").mkdir(parents=True)
+    (tmp_path / "Models/In/Packets.cs").write_text("public partial class Packets {}")  # ModelGenerator's: not its own
     assert declared_classes(tmp_path) == {"EnrichedPackets"}
 
 

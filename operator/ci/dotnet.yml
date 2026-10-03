@@ -1,21 +1,21 @@
 # Processor repos include this:
 #
 #   include:
-#     - project: foundry-platform/common/scripts
-#       file: ci/processor.yml
+#     - project: foundry-platform/foundry-ci
+#       file: operator/ci/dotnet.yml
 #
-# Checks operator.yaml (validators/processors/typecheck.py), generates the JSON Schemas of the types the operator
-# owns (schema/SchemaGen: NJsonSchema, the System.Text.Json settings the operators serialize with). On merge requests,
-# a breaking change against the latest version in common/schemaRegistry fails; on main, changed schemas are
+# Checks operator.yaml (operator/validate/typecheck.py), generates the JSON Schemas of the types the operator
+# owns (operator/schema/SchemaGen: NJsonSchema, the System.Text.Json settings the operators serialize with). On merge requests,
+# a breaking change against the latest version in registries/schema-registry fails; on main, changed schemas are
 # committed there as new versions. Either fails if another operator owns the type (owner in <Type>/metadata.yaml); types with ignoreSchema: true are skipped.
 # Builds the processor's $IMAGE_ARCH image with the .NET SDK (no Docker needed) and pushes it as
-# $CI_REGISTRY_IMAGE[/<PROCESSOR_PATH>]:$CI_COMMIT_SHORT_SHA, the image deploy/render.py points at.
-# The pipelines repo deploys it on its next run.
+# $CI_REGISTRY_IMAGE[/<PROCESSOR_PATH>]:$CI_COMMIT_SHORT_SHA, the image pipeline/deploy/render.py points at.
+# pipeline-manifests deploys it on its next run.
 variables:
   PROCESSOR_PATH: ""  # the processor's folder, in a repo holding several
   IMAGE_ARCH: arm64  # amd64 or arm64
   DOTNET_BASE_IMAGE: mcr.microsoft.com/dotnet/runtime:8.0
-  # Feed with the Foundry.Common packages (foundry-common's GitLab NuGet registry); empty: the runner's NuGet
+  # Feed with the Foundry packages (foundry-packages's GitLab NuGet registry); empty: the runner's NuGet
   # config already has them. Override all three as group variables for another feed (e.g. Artifactory).
   FOUNDRY_NUGET_FEED: ${CI_API_V4_URL}/projects/87169966/packages/nuget/index.json
   FOUNDRY_NUGET_USER: gitlab-ci-token
@@ -42,20 +42,20 @@ validate:
   image: python:3.12
   script:
     - pip install --quiet pyyaml
-    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/scripts.git /tmp/scripts
-    - python /tmp/scripts/validators/processors/typecheck.py "${PROCESSOR_PATH:-.}"
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/foundry-ci.git /tmp/foundry-ci
+    - python /tmp/foundry-ci/operator/validate/typecheck.py "${PROCESSOR_PATH:-.}"
 
 schemas:
   extends: .foundry-dotnet
   stage: validate
   image: mcr.microsoft.com/dotnet/sdk:8.0
   script:
-    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/scripts.git /tmp/scripts
-    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/foundry-ci.git /tmp/foundry-ci
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/registries/schema-registry.git /tmp/schema-registry
     - DIR=${PROCESSOR_PATH:-.}
     - PROJECT=$(ls "$DIR"/*.csproj | head -1)
     - dotnet build "$PROJECT" -c Release -o /tmp/operator
-    - dotnet run --project /tmp/scripts/schema/SchemaGen -- "/tmp/operator/$(basename "$PROJECT" .csproj).dll" "$DIR/operator.yaml" schemas /tmp/schemaRegistry
+    - dotnet run --project /tmp/foundry-ci/operator/schema/SchemaGen -- "/tmp/operator/$(basename "$PROJECT" .csproj).dll" "$DIR/operator.yaml" schemas /tmp/schema-registry
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
@@ -71,11 +71,11 @@ schema-check:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
   script:
     - pip install --quiet pyyaml
-    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/scripts.git /tmp/scripts
-    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
-    - python /tmp/scripts/schema/registry.py check schemas --owner "${CI_PROJECT_PATH##*/}${PROCESSOR_PATH:+/$PROCESSOR_PATH}" --registry /tmp/schemaRegistry
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/foundry-ci.git /tmp/foundry-ci
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/registries/schema-registry.git /tmp/schema-registry
+    - python /tmp/foundry-ci/operator/schema/registry.py check schemas --owner "${CI_PROJECT_PATH##*/}${PROCESSOR_PATH:+/$PROCESSOR_PATH}" --registry /tmp/schema-registry
 
-# Commits new schema versions to schemaRegistry over SSH with its deploy key (SCHEMA_REGISTRY_KEY: base64, a
+# Commits new schema versions to schema-registry over SSH with its deploy key (SCHEMA_REGISTRY_KEY: base64, a
 # protected group variable, so main only).
 schema-publish:
   extends: .foundry-git
@@ -87,14 +87,14 @@ schema-publish:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
     - pip install --quiet pyyaml
-    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/scripts.git /tmp/scripts
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/foundry-ci.git /tmp/foundry-ci
     - OWNER="${CI_PROJECT_PATH##*/}${PROCESSOR_PATH:+/$PROCESSOR_PATH}"
     - mkdir -p ~/.ssh && echo "$SCHEMA_REGISTRY_KEY" | base64 -d > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
     - ssh-keyscan -q -p "$CI_SERVER_SHELL_SSH_PORT" "$CI_SERVER_SHELL_SSH_HOST" >> ~/.ssh/known_hosts
-    - git clone --quiet "ssh://git@${CI_SERVER_SHELL_SSH_HOST}:${CI_SERVER_SHELL_SSH_PORT}/foundry-platform/common/schemaRegistry.git" /tmp/schemaRegistry
-    - python /tmp/scripts/schema/registry.py publish schemas --owner "$OWNER" --registry /tmp/schemaRegistry
-    - cd /tmp/schemaRegistry && git add -A
-    - if git diff --cached --quiet; then echo "schemaRegistry unchanged"; exit 0; fi
+    - git clone --quiet "ssh://git@${CI_SERVER_SHELL_SSH_HOST}:${CI_SERVER_SHELL_SSH_PORT}/foundry-platform/registries/schema-registry.git" /tmp/schema-registry
+    - python /tmp/foundry-ci/operator/schema/registry.py publish schemas --owner "$OWNER" --registry /tmp/schema-registry
+    - cd /tmp/schema-registry && git add -A
+    - if git diff --cached --quiet; then echo "schema-registry unchanged"; exit 0; fi
     - git -c user.name="Foundry CI" -c user.email="noreply@${CI_SERVER_HOST}" commit -qm "$OWNER@$CI_COMMIT_SHORT_SHA" -m "$(git diff --cached --name-only)"
     - |
       for i in 1 2 3; do

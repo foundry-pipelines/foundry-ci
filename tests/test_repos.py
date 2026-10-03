@@ -1,7 +1,7 @@
 from conftest import load
 
-pipeline = load("lib/pipeline.py")
-render = load("deploy/render.py")
+pipeline = load("shared/pipeline.py")
+render = load("pipeline/deploy/render.py")
 
 
 def test_project_path_is_on_this_gitlab(monkeypatch):
