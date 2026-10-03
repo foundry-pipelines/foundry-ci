@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Renders a pipeline's Kubernetes files: one folder per processor under DIR/Processors/.
 
-    python deploy/render.py PipelineManifest.yaml -o DIR [--registry CONFIG_REGISTRY_DIR]
+    python deploy/render.py PipelineManifest.yaml -o DIR [--registry CONFIG_REGISTRY_DIR] [--image-registry HOST]
 
 Run the validators first: this only reports what stops it from rendering. Each processor gets a
 ConfigMap with its appsettings.json (a Foundry section: the pipeline and processor names and the
 Kafkas it reads and writes, profiles from ConfigRegistry merged in) and, by the Runtime in its
 operator.yaml, a Deployment (dotnet) or a FlinkDeployment (flink). Images are
-registry.gitlab.com/<project>[/<path>]:<short sha of Ref>, as ci/processor.yml and ci/flink.yml push them.
+<image registry>/<project>[/<path>]:<short sha of Ref>, as ci/processor.yml and ci/flink.yml push them; the
+image registry is the GitLab's container registry ($CI_REGISTRY in CI).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -80,15 +82,16 @@ def appsettings(manifest: dict, kafkas: dict, processor: str, runtime: str, edge
     return {"Foundry": foundry}
 
 
-def image_of(spec: dict, commit: str) -> str:
-    m = re.match(r"^https://gitlab\.com/(.+?)(\.git)?$", spec["Repo"])
+def image_of(spec: dict, commit: str, image_registry: str) -> str:
+    m = re.match(r"^https?://[^/]+/(.+?)(\.git)?/?$", spec["Repo"])
     if not m:
-        raise ConfigError([f"{spec['Repo']}: can only derive images for gitlab.com repos"])
+        raise ConfigError([f"{spec['Repo']}: can only derive images for http(s) repo URLs"])
     path = "/".join(dns_name(p) for p in (m.group(1) + "/" + spec.get("Path", "")).strip("/").split("/"))
-    return f"registry.gitlab.com/{path}:{commit[:8]}"
+    return f"{image_registry}/{path}:{commit[:8]}"
 
 
-def k8s(manifest: dict, kafkas: dict, processor: str, runtime: str, settings: dict, commit: str) -> dict[str, dict]:
+def k8s(manifest: dict, kafkas: dict, processor: str, runtime: str, settings: dict, commit: str,
+        image_registry: str) -> dict[str, dict]:
     """The Kubernetes files for one processor. No namespace: deploy.sh sets it."""
     spec = manifest["Processors"][processor]
     name, text = dns_name(processor), json.dumps(settings, indent=2) + "\n"
@@ -105,7 +108,7 @@ def k8s(manifest: dict, kafkas: dict, processor: str, runtime: str, settings: di
     annotations = {"foundry/config-hash": hashlib.sha256(text.encode()).hexdigest()[:16], "foundry/commit": commit}
     container_security = {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
     if runtime == "flink":
-        return {"configmap.yaml": configmap, **flink(name, labels, annotations, image_of(spec, commit), env, container_security)}
+        return {"configmap.yaml": configmap, **flink(name, labels, annotations, image_of(spec, commit, image_registry), env, container_security)}
     deployment = {
         "apiVersion": "apps/v1", "kind": "Deployment",
         "metadata": {"name": name, "labels": labels},
@@ -117,7 +120,7 @@ def k8s(manifest: dict, kafkas: dict, processor: str, runtime: str, settings: di
                 "spec": {
                     "securityContext": {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}},
                     "containers": [{
-                        "name": name, "image": image_of(spec, commit),
+                        "name": name, "image": image_of(spec, commit, image_registry),
                         "env": [{"name": "DOTNET_ENVIRONMENT", "value": "Production"}, *env],
                         "resources": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"memory": "256Mi"}},
                         "securityContext": {**container_security, "readOnlyRootFilesystem": True},
@@ -180,7 +183,7 @@ def flink(name: str, labels: dict, annotations: dict, image: str, env: list, con
             "serviceaccount.yaml": account, "role.yaml": role, "rolebinding.yaml": binding}
 
 
-def render(manifest: dict, registry: Path, registry_commit: str) -> dict[str, dict[str, dict]]:
+def render(manifest: dict, registry: Path, registry_commit: str, image_registry: str) -> dict[str, dict[str, dict]]:
     decls, commits, errors = processor_decls(manifest)
     if errors:
         raise ConfigError(errors)
@@ -190,7 +193,7 @@ def render(manifest: dict, registry: Path, registry_commit: str) -> dict[str, di
     for processor in section(manifest, "Processors"):
         runtime = decls[processor]["Runtime"]
         settings = appsettings(manifest, resolved, processor, runtime, edges, registry_commit)
-        out[processor] = k8s(manifest, resolved, processor, runtime, settings, commits[processor])
+        out[processor] = k8s(manifest, resolved, processor, runtime, settings, commits[processor], image_registry)
     return out
 
 
@@ -199,14 +202,18 @@ def main():
     p.add_argument("manifest", type=Path)
     p.add_argument("-o", "--output", type=Path, required=True, help="directory")
     p.add_argument("--registry", type=Path, help="local configRegistry checkout (default: clone ConfigRegistry.Repo at Ref)")
+    p.add_argument("--image-registry", default=os.environ.get("CI_REGISTRY"),
+                   help="container registry the images are in (default: $CI_REGISTRY)")
     args = p.parse_args()
+    if not args.image_registry:
+        p.error("--image-registry or CI_REGISTRY required")
     manifest = load_manifest(args.manifest)
     if args.registry:
-        rendered = render(manifest, args.registry, "local")
+        rendered = render(manifest, args.registry, "local", args.image_registry)
     else:
         reg = section(manifest, "ConfigRegistry")
         with checkout(reg["Repo"], reg["Ref"]) as (root, commit):
-            rendered = render(manifest, root, commit)
+            rendered = render(manifest, root, commit, args.image_registry)
     # Everything is built before anything is written, so an error leaves no partial output.
     for processor, files in rendered.items():
         for f, obj in files.items():
