@@ -1,6 +1,4 @@
 __pycache__/
 .venv/
-manifest.schema.json
 bin/
 obj/
-operator.schema.json

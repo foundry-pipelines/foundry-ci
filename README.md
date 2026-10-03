@@ -28,14 +28,6 @@ out: [DecodeEnrichment]
 
 `render.py PipelineManifest.yaml -o DIR` writes each processor's Kubernetes files (a ConfigMap with its `appsettings.json`, and a Deployment or a FlinkDeployment by `Runtime`); `deploy.sh DIR...` applies them, one namespace per pipeline folder. Processors read `Foundry:Input` (flink: `Foundry:Inputs`) and `Foundry:Output`, each with `Topic`, `AllowedTypes` and `ConnectionSettings` (the `Config` profile from [configRegistry](https://gitlab.com/foundry-platform/common/configRegistry) merged in).
 
-## ide/
-
-`manifest_schema.py --registry DIR [-O operator.schema.json]` writes the JSON Schemas IDEs autocomplete manifests and `operator.yaml` with (types from schemaRegistry: `--schema-registry DIR`, else the GitLab API). CI publishes them on every push to `main` here, in configRegistry and in schemaRegistry:
-
-```yaml
-# yaml-language-server: $schema=https://gitlab.com/foundry-platform/common/scripts/-/jobs/artifacts/main/raw/manifest.schema.json?job=schema
-```
-
 ## lib/
 
 `pipeline.py`: what the scripts above share.

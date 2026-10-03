@@ -1,22 +1,6 @@
-# Runs on every push to main here, and when foundry-platform/common/configRegistry or schemaRegistry change
-# (triggered from there): publishes the IDE schemas of PipelineManifest.yaml and operator.yaml as this job's
-# artifacts. Tests run on every push.
+# Tests run on every push.
 test:
   image: python:3.12
   script:
     - pip install --quiet pyyaml pytest
     - pytest -q -p no:cacheprovider tests
-
-schema:
-  image: python:3.12  # not -slim: needs git
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-  script:
-    - pip install --quiet pyyaml
-    - git config --global url."${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/".insteadOf "${CI_SERVER_URL}/"
-    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/configRegistry.git /tmp/registry
-    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
-    - python ide/manifest_schema.py --registry /tmp/registry --schema-registry /tmp/schemaRegistry -o manifest.schema.json -O operator.schema.json
-  artifacts:
-    paths: [manifest.schema.json, operator.schema.json]
-    expire_in: never

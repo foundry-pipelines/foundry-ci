@@ -28,8 +28,6 @@ import os
 import re
 import subprocess
 import tempfile
-import urllib.error
-import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -47,7 +45,6 @@ CONNECTION_KEYS = {"Brokers", "SecurityProtocol", "SaslMechanism", "SecretRef"}
 PROFILE_RE = re.compile(r"^kafka/[a-z0-9][a-z0-9._-]*$")
 GITLAB_URL = (os.environ.get("CI_SERVER_URL") or os.environ.get("GITLAB_URL") or "https://gitlab.com").rstrip("/")
 SCHEMA_REGISTRY_REPO = f"{GITLAB_URL}/foundry-platform/common/schemaRegistry.git"
-SCHEMA_REGISTRY_API = f"{GITLAB_URL}/api/v4/projects/foundry-platform%2Fcommon%2FschemaRegistry"
 META_FILE = "metadata.yaml"
 GENERATED_DIR = ("Contracts", "In")  # gen-types' classes of input types other operators own
 CLASS_RE = re.compile(r"^\s*(?:(?:public|internal|sealed|abstract|static|partial|final)\s+)*(?:class|record|struct)\s+([A-Za-z_]\w*)", re.M)
@@ -233,24 +230,6 @@ class SchemaRegistry:
             (self.root / name / META_FILE).write_text(yaml.safe_dump({"owner": owner}, sort_keys=False))
         (self.root / name / f"v{version}.json").write_text(json.dumps(schema, indent=2) + "\n")
         return version
-
-
-def registry_type_names(local: Path | None = None, ref: str = DEFAULT_REF) -> set[str]:
-    """schemaRegistry's type names: from a local clone, or its tree through the GitLab API."""
-    if local is not None:
-        return SchemaRegistry(local).types()
-    names, page = set(), "1"
-    while page:
-        url = f"{SCHEMA_REGISTRY_API}/repository/tree?recursive=true&per_page=100&ref={ref}&page={page}"
-        try:
-            token = {"PRIVATE-TOKEN": os.environ["GITLAB_TOKEN"]} if os.environ.get("GITLAB_TOKEN") else {}
-            with urllib.request.urlopen(urllib.request.Request(url, headers=token), timeout=30) as resp:
-                entries, page = json.load(resp), resp.headers.get("X-Next-Page", "")
-        except (urllib.error.URLError, ValueError) as e:
-            raise ConfigError([f"schemaRegistry API {url}: {e}"]) from None
-        names |= {e["path"].split("/")[0] for e in entries
-                  if e["type"] == "blob" and re.fullmatch(rf"[^/]+/{re.escape(META_FILE)}", e["path"])}
-    return names
 
 
 @contextmanager

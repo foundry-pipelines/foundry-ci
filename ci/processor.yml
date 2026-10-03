@@ -9,8 +9,8 @@
 # a breaking change against the latest version in common/schemaRegistry fails; on main, changed schemas are
 # committed there as new versions. Either fails if another operator owns the type (owner in <Type>/metadata.yaml); types with ignoreSchema: true are skipped.
 # Builds the processor's $IMAGE_ARCH image with the .NET SDK (no Docker needed) and pushes it as
-# $CI_REGISTRY_IMAGE[/<PROCESSOR_PATH>]:$CI_COMMIT_SHORT_SHA, the image deploy/render.py points at,
-# then re-renders the pipelines so ones following this branch pick it up.
+# $CI_REGISTRY_IMAGE[/<PROCESSOR_PATH>]:$CI_COMMIT_SHORT_SHA, the image deploy/render.py points at.
+# The pipelines repo deploys it on its next run.
 variables:
   PROCESSOR_PATH: ""  # the processor's folder, in a repo holding several
   IMAGE_ARCH: arm64  # amd64 or arm64
@@ -21,7 +21,7 @@ variables:
   FOUNDRY_NUGET_USER: gitlab-ci-token
   FOUNDRY_NUGET_PASSWORD: $CI_JOB_TOKEN
 
-stages: [validate, build, deploy]
+stages: [validate, build]
 
 # Clones of this GitLab's projects (internal) authenticate with the job token: the calling project must be on
 # their CI/CD job token allowlists.
@@ -117,13 +117,3 @@ build-image:
       dotnet publish "${PROCESSOR_PATH:-.}" -c Release -r linux-${IMAGE_ARCH/amd64/x64} --self-contained false
       -t:PublishContainer -p:EnableSdkContainerSupport=true -p:ContainerUser=1654 -p:ContainerBaseImage=$DOTNET_BASE_IMAGE
       -p:ContainerRegistry=$CI_REGISTRY -p:ContainerRepository=$REPOSITORY -p:ContainerImageTags=$CI_COMMIT_SHORT_SHA
-
-render:
-  stage: deploy
-  needs: [build-image, schema-publish]  # the pipelines' validators look the types up in schemaRegistry
-  inherit:
-    variables: false  # pipelines doesn't accept pipeline variables
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-  trigger:
-    project: foundry-platform/pipelines
