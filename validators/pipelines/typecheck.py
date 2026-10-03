@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Type-checks a pipeline: its Kafkas, Processors and Flow, against each processor's processor.yaml.
 
-    python validators/pipelines/types.py PipelineManifest.yaml... [--models FOUNDRY_COMMON_DIR]
+    python validators/pipelines/typecheck.py PipelineManifest.yaml... [--models FOUNDRY_COMMON_DIR]
 
 - Kafkas have a Config, Topic and AllowedTypes; Input and Output exist. AllowedTypes are classes in
   Foundry.Common.Models (or types a processor of the pipeline declares). Nothing checks the shape of

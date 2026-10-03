@@ -6,8 +6,8 @@ Shared tooling for Foundry pipelines. Python 3 with `pyyaml`; everything that ne
 
 ```sh
 python validators/pipelines/cycles.py PipelineManifest.yaml   # Flow has no cycle
-python validators/pipelines/types.py PipelineManifest.yaml    # Kafkas, Processors and Flow line up by type
-python validators/processors/types.py [PROCESSOR_DIR]         # processor.yaml's types are C# classes
+python validators/pipelines/typecheck.py PipelineManifest.yaml    # Kafkas, Processors and Flow line up by type
+python validators/processors/typecheck.py [PROCESSOR_DIR]         # processor.yaml's types are C# classes
 ```
 
 Types are names of C# classes: the ones in [Foundry.Common.Models](https://gitlab.com/foundry-platform/common/foundry-common) (or, for a processor, its own project). Nothing checks the shape of the data. `--models DIR` uses a local foundry-common checkout instead of cloning it. `pipelines` CI runs the pipeline validators; `ci/processor.yml` and `ci/flink.yml` run the processor one.

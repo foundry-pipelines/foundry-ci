@@ -2,7 +2,7 @@
 """Checks a processor's processor.yaml: its keys, Runtime, and that every in/out type name is a C# class,
 in Foundry.Common.Models or declared in the processor's own project.
 
-    python validators/processors/types.py [PROCESSOR_DIR...] [--models FOUNDRY_COMMON_DIR]
+    python validators/processors/typecheck.py [PROCESSOR_DIR...] [--models FOUNDRY_COMMON_DIR]
 
 PROCESSOR_DIR defaults to the current directory.
 """

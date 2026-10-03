@@ -4,7 +4,7 @@
 #     - project: foundry-platform/common/scripts
 #       file: ci/processor.yml
 #
-# Checks processor.yaml (validators/processors/types.py), builds the processor's arm64 image with the .NET SDK (no Docker needed) and pushes it as
+# Checks processor.yaml (validators/processors/typecheck.py), builds the processor's arm64 image with the .NET SDK (no Docker needed) and pushes it as
 # $CI_REGISTRY_IMAGE[/<PROCESSOR_PATH>]:$CI_COMMIT_SHORT_SHA, the image deploy/render.py points at,
 # then re-renders the pipelines so ones following this branch pick it up.
 variables:
@@ -18,7 +18,7 @@ validate:
   script:
     - pip install --quiet pyyaml
     - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/scripts.git /tmp/scripts
-    - python /tmp/scripts/validators/processors/types.py "${PROCESSOR_PATH:-.}"
+    - python /tmp/scripts/validators/processors/typecheck.py "${PROCESSOR_PATH:-.}"
 
 build-image:
   stage: build
