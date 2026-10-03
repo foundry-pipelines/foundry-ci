@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Type-checks a pipeline: its Kafkas, Processors and Flow, against each processor's processor.yaml.
+"""Type-checks a pipeline: its Kafkas, Processors and Flow, against each processor's operator.yaml.
 
-    python validators/pipelines/typecheck.py PipelineManifest.yaml... [--models FOUNDRY_COMMON_DIR]
+    python validators/pipelines/typecheck.py PipelineManifest.yaml... [--schema-registry DIR] [--config-registry DIR]
 
-- Kafkas have a Config, Topic and AllowedTypes; Input and Output exist. AllowedTypes are classes in
-  Foundry.Common.Models (or types a processor of the pipeline declares). Nothing checks the shape of
-  the data, only type names.
-- ConfigRegistry has a Repo and a Ref; processors have a Repo and a processor.yaml at Ref.
+- Kafkas have a Config, Topic and AllowedTypes; Input and Output exist. Each Config is a profile in
+  configRegistry (at the manifest's Ref, or --config-registry). AllowedTypes and processors' in/out
+  types have schemas in schemaRegistry (cloned at main, or --schema-registry).
+- ConfigRegistry has a Repo and a Ref; processors have a Repo and an operator.yaml at Ref.
 - Flow connects a Kafka to a processor or a processor to a Kafka, between things the manifest defines,
   and everything it defines is connected. Nothing writes Input.
 - A processor reads every type its input Kafkas allow (in), and each type it reads comes from one of
   them. Its output Kafka allows every type it writes (out), and each type a Kafka allows is written
-  there by one of its writers.
+  there by one of its writers. Every type a processor reads is written by a processor of the pipeline
+  or comes via Input.
 - dotnet processors read one Kafka; every processor writes one.
 """
 
@@ -20,11 +21,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
-from pipeline import (KAFKA_KEYS, MANDATORY_KAFKAS, MANIFEST_KEYS, PROCESSOR_KEYS, ConfigError,  # noqa: E402
-                      flow, load_manifest, model_types, processor_decls, run, section, types_of)
+from pipeline import (DEFAULT_REF, KAFKA_KEYS, MANDATORY_KAFKAS, MANIFEST_KEYS, PROCESSOR_KEYS,  # noqa: E402
+                      ConfigError, checkout, flow, load_manifest, load_profile, processor_decls, run,
+                      schema_registry, section, types_of)
 
 
-def check(manifest: dict, decls: dict[str, dict], models: set[str]) -> list[str]:
+def check(manifest: dict, decls: dict[str, dict], registered: set[str], profiles: Path | None = None) -> list[str]:
+    """profiles: a configRegistry checkout to find each Kafka's Config in; None skips that check."""
     errors = [f"{k}: unknown top-level key" for k in manifest if k not in MANIFEST_KEYS]
     if not manifest.get("Name"):
         errors.append("Name: required")
@@ -34,7 +37,6 @@ def check(manifest: dict, decls: dict[str, dict], models: set[str]) -> list[str]
     errors += [f"Kafkas.{k}: required" for k in MANDATORY_KAFKAS if k not in kafkas]
     errors += [f"{n}: both a Kafka and a processor" for n in kafkas.keys() & processors.keys()]
 
-    known = models | {t for d in decls.values() for t in types_of(d.get("in")) + types_of(d.get("out"))}
     allowed: dict[str, set[str]] = {}
     for name, spec in kafkas.items():
         spec = spec if isinstance(spec, dict) else {}
@@ -43,8 +45,13 @@ def check(manifest: dict, decls: dict[str, dict], models: set[str]) -> list[str]
         types = types_of(spec.get("AllowedTypes"))
         if spec.get("AllowedTypes") and not types:
             errors.append(f"Kafkas.{name}.AllowedTypes: must be a list of type names, e.g. [Packets]")
-        errors += [f"Kafkas.{name}.AllowedTypes: unknown type {t!r} (known: {', '.join(sorted(known))})"
-                   for t in types if t not in known]
+        errors += [f"Kafkas.{name}.AllowedTypes: {t!r} is not in schemaRegistry"
+                   for t in types if t not in registered]
+        if profiles is not None and spec.get("Config"):
+            try:
+                load_profile(profiles, spec["Config"])
+            except ConfigError as e:
+                errors += [f"Kafkas.{name}.Config: {m}" for m in e.errors]
         allowed[name] = set(types)
     for name, spec in processors.items():
         spec = spec if isinstance(spec, dict) else {}
@@ -77,8 +84,9 @@ def check(manifest: dict, decls: dict[str, dict], models: set[str]) -> list[str]
     for name in processors:
         decl = decls.get(name)
         if decl is None:
-            continue  # no processor.yaml: reported by processor_decls
+            continue  # no operator.yaml: reported by processor_decls
         ins, outs = set(types_of(decl.get("in"))), set(types_of(decl.get("out")))
+        errors += [f"{name}: {t!r} is not in schemaRegistry" for t in sorted(ins | outs) if t not in registered]
         if not reads[name]:
             errors.append(f"{name}: reads no Kafka")
         if decl.get("Runtime", "dotnet") == "dotnet" and len(reads[name]) > 1:
@@ -93,6 +101,11 @@ def check(manifest: dict, decls: dict[str, dict], models: set[str]) -> list[str]
         for k in writes[name]:
             if extra := outs - allowed.get(k, set()):
                 errors.append(f"Flow: {name} -> {k}: {name} writes {', '.join(sorted(extra))} but {k} allows {', '.join(sorted(allowed.get(k, ()))) or 'nothing'}")
+    produced = {t for d in decls.values() for t in types_of(d.get("out"))}
+    via_input = set(types_of(section(kafkas, "Input").get("AllowedTypes")))
+    for name, decl in decls.items():
+        errors += [f"{name}: reads {t} but no processor writes it and Input doesn't allow it"
+                   for t in types_of(decl.get("in")) if t not in produced | via_input]
     for k in kafkas:
         writers = [p for p, w in writes.items() if k in w and p in decls]
         if k != "Input" and writers and (unwritten := allowed[k] - {t for p in writers for t in types_of(decls[p].get("out"))}):
@@ -100,17 +113,34 @@ def check(manifest: dict, decls: dict[str, dict], models: set[str]) -> list[str]
     return errors
 
 
+def with_profiles(manifest: dict, local: Path | None, fn) -> list[str]:
+    """fn(configRegistry checkout): local, or the manifest's Repo at Ref."""
+    if local is not None:
+        return fn(local)
+    registry = section(manifest, "ConfigRegistry")
+    if not registry.get("Repo"):
+        return fn(None)  # reported by check
+    try:
+        with checkout(registry["Repo"], str(registry.get("Ref") or DEFAULT_REF)) as (root, _):
+            return fn(root)
+    except ConfigError as e:
+        return [f"ConfigRegistry: {m}" for m in e.errors]
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("manifests", type=Path, nargs="+")
-    p.add_argument("--models", type=Path, help="local foundry-common checkout (default: clone it)")
+    p.add_argument("--schema-registry", type=Path, help="local schemaRegistry checkout (default: clone it)")
+    p.add_argument("--config-registry", type=Path, help="local configRegistry checkout (default: clone the manifest's)")
     args = p.parse_args()
-    models = model_types(args.models)
+    with schema_registry(args.schema_registry) as registry:
+        registered = registry.types()
     errors = []
     for path in args.manifests:
         manifest = load_manifest(path)
         decls, _, found = processor_decls(manifest)
-        found += check(manifest, decls, models)
+        found += with_profiles(manifest, args.config_registry,
+                               lambda profiles: check(manifest, decls, registered, profiles))
         errors += [f"{path}: {m}" for m in found]
         if not found:
             print(f"ok: {path}: types line up")

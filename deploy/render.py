@@ -6,7 +6,7 @@
 Run the validators first: this only reports what stops it from rendering. Each processor gets a
 ConfigMap with its appsettings.json (a Foundry section: the pipeline and processor names and the
 Kafkas it reads and writes, profiles from ConfigRegistry merged in) and, by the Runtime in its
-processor.yaml, a Deployment (dotnet) or a FlinkDeployment (flink). Images are
+operator.yaml, a Deployment (dotnet) or a FlinkDeployment (flink). Images are
 registry.gitlab.com/<project>[/<path>]:<short sha of Ref>, as ci/processor.yml and ci/flink.yml push them.
 """
 

@@ -4,8 +4,12 @@
 #     - project: foundry-platform/common/scripts
 #       file: ci/flink.yml
 #
-# Checks processor.yaml (validators/processors/typecheck.py), builds the job jar (Gradle, `shadowJar` producing build/libs/job.jar) and pushes an arm64 image of the
-# official Flink image plus that jar at /opt/flink/usrlib/job.jar, as $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+# Checks operator.yaml (validators/processors/typecheck.py, which also checks pom.xml's jsonschema-maven-plugin
+# classNames are its out types), builds the job jar with Maven (maven-shade-plugin producing target/job.jar,
+# jsonschema-maven-plugin target/schemas/<Type>.json). On merge requests, a breaking change against the latest version
+# in common/schemaRegistry fails; on main, changed schemas are committed there as new versions. Either fails if
+# another operator owns the type (<Type>/owner.txt). Pushes an arm64 image of the official Flink image plus that jar
+# at /opt/flink/usrlib/job.jar, as $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
 # (what deploy/render.py points a FlinkDeployment at); then re-renders and deploys the pipelines.
 # crane appends the jar as one layer, so no Docker daemon and no emulation are needed.
 variables:
@@ -23,11 +27,57 @@ validate:
 
 build-jar:
   stage: build
-  image: gradle:jdk21
+  image: maven:3-eclipse-temurin-21
+  variables:
+    MAVEN_OPTS: -Dmaven.repo.local=$CI_PROJECT_DIR/.m2
+  cache:
+    paths: [.m2/]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
   script:
-    - gradle --no-daemon -q shadowJar
+    - mvn -q -B package
   artifacts:
-    paths: [build/libs/job.jar]
+    paths: [target/job.jar, target/schemas/]
+
+schema-check:
+  stage: image
+  needs: [build-jar]
+  image: python:3.12
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - pip install --quiet pyyaml
+    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/scripts.git /tmp/scripts
+    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
+    - python /tmp/scripts/schema/registry.py check target/schemas --owner "$CI_PROJECT_PATH${PROCESSOR_PATH:+/$PROCESSOR_PATH}" --registry /tmp/schemaRegistry
+
+# Commits new schema versions to schemaRegistry over SSH with its deploy key (SCHEMA_REGISTRY_KEY: base64, a
+# protected group variable, so main only).
+schema-publish:
+  stage: image
+  needs: [validate, build-jar]
+  image: python:3.12
+  resource_group: schema-registry
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - pip install --quiet pyyaml
+    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/scripts.git /tmp/scripts
+    - OWNER="$CI_PROJECT_PATH${PROCESSOR_PATH:+/$PROCESSOR_PATH}"
+    - mkdir -p ~/.ssh && echo "$SCHEMA_REGISTRY_KEY" | base64 -d > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+    - ssh-keyscan -q gitlab.com >> ~/.ssh/known_hosts
+    - git clone --quiet git@gitlab.com:foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
+    - python /tmp/scripts/schema/registry.py publish target/schemas --owner "$OWNER" --registry /tmp/schemaRegistry
+    - cd /tmp/schemaRegistry && git add -A
+    - if git diff --cached --quiet; then echo "schemaRegistry: nothing new"; exit 0; fi
+    - git -c user.name="Foundry CI" -c user.email="noreply@gitlab.com" commit -qm "$OWNER@$CI_COMMIT_SHORT_SHA" -m "$(git diff --cached --name-only)"
+    - |
+      for i in 1 2 3; do
+        git push -q origin HEAD:main && exit 0
+        git pull -q --rebase origin main
+      done
+      exit 1
 
 build-image:
   stage: image
@@ -37,13 +87,13 @@ build-image:
     entrypoint: [""]
   script:
     - crane auth login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD"
-    - mkdir -p layer/opt/flink/usrlib && cp build/libs/job.jar layer/opt/flink/usrlib/job.jar
+    - mkdir -p layer/opt/flink/usrlib && cp target/job.jar layer/opt/flink/usrlib/job.jar
     - tar -C layer -cf layer.tar opt
     - crane append --platform linux/arm64 -b "$FLINK_IMAGE" -f layer.tar -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
 
 render:
   stage: deploy
-  needs: [build-image]
+  needs: [build-image, schema-publish]  # the pipelines' validators look the types up in schemaRegistry
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   inherit:

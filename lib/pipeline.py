@@ -1,5 +1,5 @@
-"""Shared by the validators and deploy/render.py: reading PipelineManifest.yaml and processor.yaml files,
-fetching repos, the connection profiles in configRegistry, and the type names in Foundry.Common.Models.
+"""Shared by the validators and deploy/render.py: reading PipelineManifest.yaml and operator.yaml files,
+fetching repos, the connection profiles in configRegistry, and the type schemas in schemaRegistry.
 
 A manifest:
 
@@ -12,13 +12,13 @@ A manifest:
     Flow:
       - Input -> XmlToJsonConverter                 # Kafka -> processor, or processor -> Kafka
 
-A processor.yaml (at the processor's Path, the repo root by default):
+A operator.yaml (at the processor's Path, the repo root by default):
 
     name: Decode
     description: Decodes the base64 payload.
     Runtime: dotnet                                 # dotnet | flink
-    in: [Packets]                                   # type names: C# classes
-    out: [DecodeEnrichment]
+    in: [Packets]                                   # type names: types in schemaRegistry
+    out: [DecodeEnrichment]                         # classes of this operator, which registers them
 """
 
 from __future__ import annotations
@@ -37,11 +37,12 @@ MANIFEST_KEYS = {"Name", "ConfigRegistry", "Kafkas", "Processors", "Flow"}
 KAFKA_KEYS = {"Config", "AllowedTypes", "Topic", "ConnectionSettings"}
 MANDATORY_KAFKAS = ("Input", "Output")
 PROCESSOR_KEYS = {"Repo", "Ref", "Path"}
-DECL_FILE = "processor.yaml"
+DECL_FILE = "operator.yaml"
 DECL_KEYS = {"name", "description", "Runtime", "in", "out"}
 RUNTIMES = ("dotnet", "flink")
 CONNECTION_KEYS = {"Brokers", "SecurityProtocol", "SaslMechanism", "SecretRef"}
 PROFILE_RE = re.compile(r"^kafka/[a-z0-9][a-z0-9._-]*$")
+SCHEMA_REGISTRY_REPO = "https://gitlab.com/foundry-platform/common/schemaRegistry.git"
 MODELS_REPO = "https://gitlab.com/foundry-platform/common/foundry-common.git"
 MODELS_DIR = "src/Foundry.Common.Models"
 CLASS_RE = re.compile(r"^\s*(?:(?:public|internal|sealed|abstract|static|partial|final)\s+)*(?:class|record|struct)\s+([A-Za-z_]\w*)", re.M)
@@ -124,10 +125,10 @@ def checkout(repo: str, ref: str):
         yield Path(tmp), fetch(repo, ref, Path(tmp))
 
 
-# --- processor.yaml -------------------------------------------------------------------------
+# --- operator.yaml -------------------------------------------------------------------------
 
 def read_decl(path: Path) -> dict:
-    """A processor.yaml, checked: name, description, Runtime, in and out (non-empty lists of type names)."""
+    """A operator.yaml, checked: name, description, Runtime, in and out (non-empty lists of type names)."""
     if not path.is_file():
         raise ConfigError([f"no {DECL_FILE}"])
     try:
@@ -149,7 +150,7 @@ def read_decl(path: Path) -> dict:
 
 
 def processor_decls(manifest: dict) -> tuple[dict[str, dict], dict[str, str], list[str]]:
-    """Each processor's processor.yaml and commit, from its Repo at Ref."""
+    """Each processor's operator.yaml and commit, from its Repo at Ref."""
     decls, commits, errors = {}, {}, []
     for name, spec in section(manifest, "Processors").items():
         if not isinstance(spec, dict) or not spec.get("Repo"):
@@ -165,11 +166,11 @@ def processor_decls(manifest: dict) -> tuple[dict[str, dict], dict[str, str], li
 
 # --- types ----------------------------------------------------------------------------------
 
-def declared_classes(root: Path, pattern: str = "*.cs") -> set[str]:
-    """Class, record and struct names declared in the files under root."""
+def declared_classes(root: Path, patterns: tuple[str, ...] = ("*.cs", "*.java")) -> set[str]:
+    """Class, record and struct names declared in the C# and Java files under root."""
     names = set()
-    for f in root.rglob(pattern):
-        if not {"bin", "obj", "build", ".git"} & set(f.relative_to(root).parts):
+    for f in (f for pattern in patterns for f in root.rglob(pattern)):
+        if not {"bin", "obj", "build", "target", ".git"} & set(f.relative_to(root).parts):
             names |= set(CLASS_RE.findall(f.read_text(errors="replace")))
     return names
 
@@ -180,6 +181,99 @@ def model_types(models: Path | None = None) -> set[str]:
         return declared_classes(models / MODELS_DIR) - {"IpAddressJsonConverter"}
     with checkout(MODELS_REPO, DEFAULT_REF) as (root, _):
         return declared_classes(root / MODELS_DIR) - {"IpAddressJsonConverter"}
+
+
+class SchemaRegistry:
+    """The schemaRegistry repo: <TypeName>/v<N>.json, the type's schema versions, and <TypeName>/owner.txt,
+    the operator that owns and alone publishes it (its project path, plus /<PROCESSOR_PATH> if set)."""
+
+    def __init__(self, root: Path):
+        self.root = root
+
+    def types(self) -> set[str]:
+        return {d.name for d in self.root.iterdir() if d.is_dir() and self.versions(d.name)}
+
+    def versions(self, name: str) -> list[int]:
+        return sorted(int(m.group(1)) for f in (self.root / name).glob("v*.json")
+                      if (m := re.fullmatch(r"v(\d+)\.json", f.name)))
+
+    def latest(self, name: str) -> dict | None:
+        versions = self.versions(name) if (self.root / name).is_dir() else []
+        return json.loads((self.root / name / f"v{versions[-1]}.json").read_text()) if versions else None
+
+    def owner(self, name: str) -> str | None:
+        path = self.root / name / "owner.txt"
+        return path.read_text().strip() if path.is_file() else None
+
+    def check(self, name: str, schema: dict, owner: str) -> list[str]:
+        """Why owner can't publish schema as name's next version: not its owner, or a breaking change."""
+        if (current := self.owner(name)) and current != owner:
+            return [f"{name}: owned by {current}, not {owner}"]
+        latest = self.latest(name)
+        return [] if latest is None else [f"{name}: breaking change: {m}" for m in breaking_changes(latest, schema)]
+
+    def publish(self, name: str, schema: dict, owner: str) -> int | None:
+        """Write schema as name's next version (and owner.txt for a new type); None if it equals the latest."""
+        if self.latest(name) == schema:
+            return None
+        version = (self.versions(name) or [0])[-1] + 1 if (self.root / name).is_dir() else 1
+        (self.root / name).mkdir(exist_ok=True)
+        (self.root / name / "owner.txt").write_text(owner + "\n")
+        (self.root / name / f"v{version}.json").write_text(json.dumps(schema, indent=2) + "\n")
+        return version
+
+
+@contextmanager
+def schema_registry(local: Path | None = None):
+    """A SchemaRegistry: a local checkout, or SCHEMA_REGISTRY_REPO at main, cloned."""
+    if local is not None:
+        yield SchemaRegistry(local)
+        return
+    with checkout(SCHEMA_REGISTRY_REPO, DEFAULT_REF) as (root, _):
+        yield SchemaRegistry(root)
+
+
+def breaking_changes(old: dict, new: dict) -> list[str]:
+    """What new breaks for consumers reading data that old described: a property removed or no longer
+    required, a type, format or enum value it now allows. Added optional properties don't break."""
+    def resolve(node, root):
+        for _ in range(20):  # $ref -> $ref chains, within the schema
+            if not (isinstance(node, dict) and str(node.get("$ref", "")).startswith("#/")):
+                break
+            target = root
+            for part in node["$ref"][2:].split("/"):
+                target = target.get(part, {}) if isinstance(target, dict) else {}
+            node = target
+        return node if isinstance(node, dict) else {}
+
+    def types(node):
+        t = node.get("type")
+        return set(t) if isinstance(t, list) else {t} if t else set()
+
+    def walk(o, n, where, depth=0):
+        o, n = resolve(o, old), resolve(n, new)
+        found = []
+        if depth > 30:  # a recursive type: what's above is enough
+            return found
+        if types(o) and (not types(n) or types(n) - types(o)):
+            found.append(f"{where}: type {sorted(types(o))} -> {sorted(types(n)) or 'any'}")
+        if "format" in o and n.get("format") != o["format"]:
+            found.append(f"{where}: format {o['format']} -> {n.get('format', 'none')}")
+        if "enum" in o and "enum" not in n:
+            found.append(f"{where}: no longer an enum")
+        elif "enum" in o and (extra := [v for v in n["enum"] if v not in o["enum"]]):
+            found.append(f"{where}: enum allows {extra}")
+        for name, prop in (o.get("properties") or {}).items():
+            if name not in (n.get("properties") or {}):
+                found.append(f"{where}.{name}: removed")
+            else:
+                found += walk(prop, n["properties"][name], f"{where}.{name}", depth + 1)
+        found += [f"{where}.{r}: no longer required" for r in o.get("required", []) if r not in n.get("required", [])]
+        if isinstance(o.get("items"), dict):
+            found += walk(o["items"], n.get("items") or {}, f"{where}[]", depth + 1)
+        return found
+
+    return walk(old, new, "$")
 
 
 # --- profiles -------------------------------------------------------------------------------

@@ -1,5 +1,11 @@
 # Runs on every push to main here, and when foundry-platform/common/configRegistry or foundry-common change
-# (triggered from there): publishes the manifest IDE schema as this job's artifact.
+# (triggered from there): publishes the manifest IDE schema as this job's artifact. Tests run on every push.
+test:
+  image: python:3.12
+  script:
+    - pip install --quiet pyyaml pytest
+    - pytest -q -p no:cacheprovider tests
+
 schema:
   image: python:3.12  # not -slim: needs git
   rules:
