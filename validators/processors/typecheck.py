@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Checks an operator's operator.yaml: its keys, Runtime, and its types. Each out type is a class
 (C# or Java) of the operator's own project: it owns and registers them. Each in type is one of its own
-classes (one arriving via Input) or a type in schemaRegistry. A Maven operator's pom.xml
-generates the schemas of exactly its out types (jsonschema-maven-plugin classNames).
+classes (one arriving via Input) or a type in schemaRegistry. A Maven operator's pom.xml generates
+the schemas of exactly its out types but those with ignoreSchema: true (jsonschema-maven-plugin classNames;
+no plugin if there are none).
 
     python validators/processors/typecheck.py [OPERATOR_DIR...] [--schema-registry DIR]
 
@@ -38,15 +39,17 @@ def pom_schema_types(pom: Path) -> set[str] | None:
     return None
 
 
-def check_pom(decl: dict, pom: Path) -> list[str]:
+def check_pom(decl: dict, pom: Path, ignored: set[str] = frozenset()) -> list[str]:
+    """ignored: types with ignoreSchema: true, which get no schema."""
     if not pom.is_file():
         return []
+    outs = set(types_of(decl["out"])) - ignored
     generated = pom_schema_types(pom)
     if generated is None:
-        return ["pom.xml: no jsonschema-maven-plugin, so out types get no schemas"]
-    outs = set(types_of(decl["out"]))
+        return [f"pom.xml: no jsonschema-maven-plugin, so {', '.join(sorted(outs))} get no schemas"] if outs else []
     return ([f"pom.xml: jsonschema-maven-plugin classNames lack out type {t!r}" for t in sorted(outs - generated)]
             + [f"pom.xml: jsonschema-maven-plugin classNames has {t!r}, not an out type in {DECL_FILE}"
+               + (" (it has ignoreSchema: true)" if t in ignored else "")
                for t in sorted(generated - outs)])
 
 
@@ -57,6 +60,7 @@ def main():
     args = p.parse_args()
     with schema_registry(args.schema_registry) as registry:
         registered = registry.types()
+        ignored = {t for t in registered if registry.ignores_schema(t)}
     errors = []
     for d in args.dirs:
         try:
@@ -65,7 +69,7 @@ def main():
             errors += [f"{d}: {m}" for m in e.errors]
             continue
         try:
-            found = check(decl, declared_classes(d), registered) + check_pom(decl, d / "pom.xml")
+            found = check(decl, declared_classes(d), registered) + check_pom(decl, d / "pom.xml", ignored)
         except ConfigError as e:
             found = e.errors
         found = [f"{d}: {m}" for m in found]

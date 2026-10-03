@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Checks or publishes the JSON Schemas in DIR (<Type>.json, from schema/SchemaGen or a Maven operator's
-jsonschema-maven-plugin) against a schemaRegistry checkout (<Type>/v<N>.json, <Type>/owner.txt).
+jsonschema-maven-plugin) against a schemaRegistry checkout (<Type>/metadata.yaml, <Type>/v<N>.json).
 
     python schema/registry.py check DIR --owner OPERATOR --registry SCHEMA_REGISTRY_DIR
     python schema/registry.py publish DIR --owner OPERATOR --registry SCHEMA_REGISTRY_DIR
 
-Both fail if OPERATOR (its project path, plus /<PROCESSOR_PATH> if set) isn't a type's owner, or a schema
+Both fail if OPERATOR (its repo name, plus /<PROCESSOR_PATH> if set) isn't a type's owner, or a schema
 breaks its latest version. publish then writes each changed schema as its type's next version; the caller
-commits and pushes the checkout.
+commits and pushes the checkout. Types with ignoreSchema: true are skipped past the owner check, and an
+operator whose types all ignore their schema may have no DIR at all.
 """
 
 import argparse
@@ -29,12 +30,15 @@ def main():
     registry = SchemaRegistry(args.registry)
     schemas = {f.stem: json.loads(f.read_text()) for f in sorted(args.dir.glob("*.json"))}
     if not schemas:
-        raise ConfigError([f"{args.dir}: no schemas"])
+        print(f"ok: {args.dir}: no schemas")
+        return
     errors = [m for name, schema in schemas.items() for m in registry.check(name, schema, args.owner)]
     if errors:
         raise ConfigError(errors)
     for name, schema in schemas.items():
-        if args.action == "check":
+        if registry.ignores_schema(name):
+            print(f"ok: {name}: ignoreSchema, skipped")
+        elif args.action == "check":
             print(f"ok: {name}: compatible")
         elif (version := registry.publish(name, schema, args.owner)) is None:
             print(f"ok: {name}: unchanged")

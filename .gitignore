@@ -3,3 +3,4 @@ __pycache__/
 manifest.schema.json
 bin/
 obj/
+operator.schema.json

@@ -10,7 +10,7 @@ python validators/pipelines/typecheck.py PipelineManifest.yaml    # Kafkas, Proc
 python validators/processors/typecheck.py [OPERATOR_DIR]          # operator.yaml's types: own classes or registered
 ```
 
-Types are folders of [schemaRegistry](https://gitlab.com/foundry-platform/common/schemaRegistry) (`<Type>/v<N>.json`, `<Type>/owner.txt`; `--schema-registry DIR` for a local checkout). Each operator owns the classes of its out types (and of in types arriving via Input); `ci/processor.yml` / `ci/flink.yml` generate their JSON Schemas (`schema/SchemaGen`, or the pom's jsonschema-maven-plugin), fail merge requests on breaking changes or a type another operator owns, and commit new versions to schemaRegistry on main (`schema/registry.py`). A pipeline's Configs must be profiles in its configRegistry (`--config-registry DIR` for a local checkout), and every type a processor reads must be written by one or come via Input. `pipelines` CI runs the pipeline validators; `ci/processor.yml` and `ci/flink.yml` run the processor one.
+Types are folders of [schemaRegistry](https://gitlab.com/foundry-platform/common/schemaRegistry) (each with a `<Type>/metadata.yaml`: `owner`, and `ignoreSchema: true` for a type without a schema; otherwise `<Type>/v<N>.json`; `--schema-registry DIR` for a local checkout). Each operator owns the classes of its out types (and of in types arriving via Input), and gets classes of the others it reads with `dotnet gen-types` (foundry-common) into `Contracts/In/`; `ci/processor.yml` / `ci/flink.yml` generate their JSON Schemas (`schema/SchemaGen`, or the pom's jsonschema-maven-plugin), fail merge requests on breaking changes or a type another operator owns, and commit new versions to schemaRegistry on main (`schema/registry.py`). A pipeline's Configs must be profiles in its configRegistry (`--config-registry DIR` for a local checkout), and every type a processor reads must be written by one or come via Input. `pipelines` CI runs the pipeline validators; `ci/processor.yml` and `ci/flink.yml` run the processor one.
 
 A processor reads every type its input Kafkas allow, and each type it writes must be allowed by its output Kafka. dotnet processors read one Kafka, flink ones any number; every processor writes one.
 
@@ -30,7 +30,7 @@ out: [DecodeEnrichment]
 
 ## ide/
 
-`manifest_schema.py --registry DIR` writes the JSON Schema IDEs autocomplete manifests with. CI publishes it on every push to `main` here, in configRegistry and in foundry-common:
+`manifest_schema.py --registry DIR [-O operator.schema.json]` writes the JSON Schemas IDEs autocomplete manifests and `operator.yaml` with (types from schemaRegistry: `--schema-registry DIR`, else the GitLab API). CI publishes them on every push to `main` here, in configRegistry and in schemaRegistry:
 
 ```yaml
 # yaml-language-server: $schema=https://gitlab.com/foundry-platform/common/scripts/-/jobs/artifacts/main/raw/manifest.schema.json?job=schema

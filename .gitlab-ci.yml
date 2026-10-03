@@ -1,5 +1,6 @@
-# Runs on every push to main here, and when foundry-platform/common/configRegistry or foundry-common change
-# (triggered from there): publishes the manifest IDE schema as this job's artifact. Tests run on every push.
+# Runs on every push to main here, and when foundry-platform/common/configRegistry or schemaRegistry change
+# (triggered from there): publishes the IDE schemas of PipelineManifest.yaml and operator.yaml as this job's
+# artifacts. Tests run on every push.
 test:
   image: python:3.12
   script:
@@ -13,7 +14,8 @@ schema:
   script:
     - pip install --quiet pyyaml
     - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/configRegistry.git /tmp/registry
-    - python ide/manifest_schema.py --registry /tmp/registry -o manifest.schema.json
+    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
+    - python ide/manifest_schema.py --registry /tmp/registry --schema-registry /tmp/schemaRegistry -o manifest.schema.json -O operator.schema.json
   artifacts:
-    paths: [manifest.schema.json]
+    paths: [manifest.schema.json, operator.schema.json]
     expire_in: never

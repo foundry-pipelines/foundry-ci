@@ -1,8 +1,11 @@
 // Writes OUT_DIR/<Type>.json, the JSON Schema of each operator.yaml type (in or out) the operator's assembly
-// declares: its output types, and input types it owns because they arrive via Input. Same System.Text.Json
+// declares: its output types, and input types it owns because they arrive via Input (not gen-types' classes in
+// <namespace>.Contracts.In, of types other operators own). Same System.Text.Json
 // settings the operators serialize with (the defaults, plus the types' own attributes).
 //
-//     dotnet run --project schema/SchemaGen -- OPERATOR_DLL OPERATOR_YAML OUT_DIR
+// With a schemaRegistry checkout, types it marks ignoreSchema: true are skipped.
+//
+//     dotnet run --project schema/SchemaGen -- OPERATOR_DLL OPERATOR_YAML OUT_DIR [SCHEMA_REGISTRY_DIR]
 using System.Net;
 using System.Reflection;
 using System.Runtime.Loader;
@@ -12,12 +15,13 @@ using NJsonSchema.Generation;
 using NJsonSchema.Generation.TypeMappers;
 using YamlDotNet.RepresentationModel;
 
-if (args.Length != 3)
+if (args.Length is < 3 or > 4)
 {
-    Console.Error.WriteLine("usage: SchemaGen OPERATOR_DLL OPERATOR_YAML OUT_DIR");
+    Console.Error.WriteLine("usage: SchemaGen OPERATOR_DLL OPERATOR_YAML OUT_DIR [SCHEMA_REGISTRY_DIR]");
     return 2;
 }
 var (dll, yamlPath, outDir) = (Path.GetFullPath(args[0]), args[1], args[2]);
+var registry = args.Length == 4 ? args[3] : null;
 
 // The operator's dependencies (Foundry.Common.Serialization, ...) resolve from its build output.
 var resolver = new AssemblyDependencyResolver(dll);
@@ -46,7 +50,12 @@ Directory.CreateDirectory(outDir);
 var errors = 0;
 foreach (var name in names)
 {
-    var matches = types.Where(t => t.Name == name).ToArray();
+    if (registry is not null && IgnoresSchema(Path.Combine(registry, name, "metadata.yaml")))
+    {
+        Console.WriteLine($"skip: {name}: ignoreSchema in schemaRegistry");
+        continue;
+    }
+    var matches = types.Where(t => t.Name == name && t.Namespace?.EndsWith(".Contracts.In") != true).ToArray();
     if (matches.Length > 1)
     {
         Console.Error.WriteLine($"error: {name}: several classes named so ({string.Join(", ", matches.Select(t => t.FullName))})");
@@ -64,3 +73,13 @@ foreach (var name in names)
     Console.WriteLine($"ok: {name}: {matches[0].FullName}");
 }
 return errors == 0 ? 0 : 1;
+
+static bool IgnoresSchema(string metadata)
+{
+    if (!File.Exists(metadata))
+        return false;
+    var doc = new YamlStream();
+    doc.Load(new StringReader(File.ReadAllText(metadata)));
+    return doc.Documents.Count > 0 && doc.Documents[0].RootNode is YamlMappingNode map
+        && map.Children.TryGetValue("ignoreSchema", out var v) && v.ToString() == "true";
+}

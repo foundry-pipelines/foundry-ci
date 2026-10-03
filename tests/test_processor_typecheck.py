@@ -47,7 +47,7 @@ def test_pom_missing_and_extra_classes(tmp_path):
 def test_pom_without_plugin(tmp_path):
     (tmp_path / "pom.xml").write_text('<project xmlns="http://maven.apache.org/POM/4.0.0"/>')
     assert typecheck.check_pom({"out": ["X"]}, tmp_path / "pom.xml") == [
-        "pom.xml: no jsonschema-maven-plugin, so out types get no schemas"]
+        "pom.xml: no jsonschema-maven-plugin, so X get no schemas"]
 
 
 def test_no_pom_is_fine(tmp_path):
@@ -66,4 +66,19 @@ def test_declared_classes_reads_java_and_skips_target(tmp_path):
     (tmp_path / "src/EnrichedPackets.java").write_text("public record EnrichedPackets(String guid) {}")
     (tmp_path / "target").mkdir()
     (tmp_path / "target/Gen.java").write_text("public class Gen {}")
+    (tmp_path / "Contracts/In").mkdir(parents=True)
+    (tmp_path / "Contracts/In/Packets.cs").write_text("public partial class Packets {}")  # gen-types': not its own
     assert declared_classes(tmp_path) == {"EnrichedPackets"}
+
+
+def test_pom_skips_ignored_types(tmp_path):
+    decl = {"out": ["EnrichedPackets", "Stats"]}
+    assert typecheck.check_pom(decl, pom(tmp_path, "foundry.join.Stats"), {"EnrichedPackets"}) == []
+    assert typecheck.check_pom(decl, pom(tmp_path, "a.Stats", "a.EnrichedPackets"), {"EnrichedPackets"}) == [
+        "pom.xml: jsonschema-maven-plugin classNames has 'EnrichedPackets', not an out type in operator.yaml"
+        " (it has ignoreSchema: true)"]
+
+
+def test_pom_needs_no_plugin_when_all_ignored(tmp_path):
+    (tmp_path / "pom.xml").write_text('<project xmlns="http://maven.apache.org/POM/4.0.0"/>')
+    assert typecheck.check_pom({"out": ["EnrichedPackets"]}, tmp_path / "pom.xml", {"EnrichedPackets"}) == []

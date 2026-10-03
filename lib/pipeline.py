@@ -27,6 +27,8 @@ import json
 import re
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -43,8 +45,9 @@ RUNTIMES = ("dotnet", "flink")
 CONNECTION_KEYS = {"Brokers", "SecurityProtocol", "SaslMechanism", "SecretRef"}
 PROFILE_RE = re.compile(r"^kafka/[a-z0-9][a-z0-9._-]*$")
 SCHEMA_REGISTRY_REPO = "https://gitlab.com/foundry-platform/common/schemaRegistry.git"
-MODELS_REPO = "https://gitlab.com/foundry-platform/common/foundry-common.git"
-MODELS_DIR = "src/Foundry.Common.Models"
+SCHEMA_REGISTRY_API = "https://gitlab.com/api/v4/projects/foundry-platform%2Fcommon%2FschemaRegistry"
+META_FILE = "metadata.yaml"
+GENERATED_DIR = ("Contracts", "In")  # gen-types' classes of input types other operators own
 CLASS_RE = re.compile(r"^\s*(?:(?:public|internal|sealed|abstract|static|partial|final)\s+)*(?:class|record|struct)\s+([A-Za-z_]\w*)", re.M)
 
 
@@ -167,31 +170,34 @@ def processor_decls(manifest: dict) -> tuple[dict[str, dict], dict[str, str], li
 # --- types ----------------------------------------------------------------------------------
 
 def declared_classes(root: Path, patterns: tuple[str, ...] = ("*.cs", "*.java")) -> set[str]:
-    """Class, record and struct names declared in the C# and Java files under root."""
+    """Class, record and struct names declared in the C# and Java files under root: the project's own,
+    so not gen-types' Contracts/In/."""
     names = set()
     for f in (f for pattern in patterns for f in root.rglob(pattern)):
-        if not {"bin", "obj", "build", "target", ".git"} & set(f.relative_to(root).parts):
+        parts = f.relative_to(root).parts
+        if not {"bin", "obj", "build", "target", ".git"} & set(parts) and parts[:2] != GENERATED_DIR:
             names |= set(CLASS_RE.findall(f.read_text(errors="replace")))
     return names
 
 
-def model_types(models: Path | None = None) -> set[str]:
-    """The classes in Foundry.Common.Models: from a local foundry-common checkout, or cloned."""
-    if models is not None:
-        return declared_classes(models / MODELS_DIR) - {"IpAddressJsonConverter"}
-    with checkout(MODELS_REPO, DEFAULT_REF) as (root, _):
-        return declared_classes(root / MODELS_DIR) - {"IpAddressJsonConverter"}
-
-
 class SchemaRegistry:
-    """The schemaRegistry repo: <TypeName>/v<N>.json, the type's schema versions, and <TypeName>/owner.txt,
-    the operator that owns and alone publishes it (its project path, plus /<PROCESSOR_PATH> if set)."""
+    """The schemaRegistry repo. A type is a folder <TypeName>/ with a metadata.yaml: owner, the operator that
+    owns and alone publishes it (its repo name, plus /<PROCESSOR_PATH> if set), and ignoreSchema: true for a
+    type without a JSON Schema (no generation, no breaking-change check; names and wiring are still checked).
+    Other types have v1.json..v<N>.json, their schema versions."""
 
     def __init__(self, root: Path):
         self.root = root
 
     def types(self) -> set[str]:
-        return {d.name for d in self.root.iterdir() if d.is_dir() and self.versions(d.name)}
+        return {d.name for d in self.root.iterdir() if (d / META_FILE).is_file()}
+
+    def metadata(self, name: str) -> dict | None:
+        path = self.root / name / META_FILE
+        if not path.is_file():
+            return None
+        meta = yaml.safe_load(path.read_text()) or {}
+        return meta if isinstance(meta, dict) else {}
 
     def versions(self, name: str) -> list[int]:
         return sorted(int(m.group(1)) for f in (self.root / name).glob("v*.json")
@@ -202,25 +208,46 @@ class SchemaRegistry:
         return json.loads((self.root / name / f"v{versions[-1]}.json").read_text()) if versions else None
 
     def owner(self, name: str) -> str | None:
-        path = self.root / name / "owner.txt"
-        return path.read_text().strip() if path.is_file() else None
+        return str((self.metadata(name) or {}).get("owner") or "").strip() or None
+
+    def ignores_schema(self, name: str) -> bool:
+        return (self.metadata(name) or {}).get("ignoreSchema") is True
 
     def check(self, name: str, schema: dict, owner: str) -> list[str]:
         """Why owner can't publish schema as name's next version: not its owner, or a breaking change."""
         if (current := self.owner(name)) and current != owner:
             return [f"{name}: owned by {current}, not {owner}"]
-        latest = self.latest(name)
+        latest = None if self.ignores_schema(name) else self.latest(name)
         return [] if latest is None else [f"{name}: breaking change: {m}" for m in breaking_changes(latest, schema)]
 
     def publish(self, name: str, schema: dict, owner: str) -> int | None:
-        """Write schema as name's next version (and owner.txt for a new type); None if it equals the latest."""
-        if self.latest(name) == schema:
+        """Write schema as name's next version (and metadata.yaml for a new type); None if it equals the
+        latest, or the type ignores its schema."""
+        if self.ignores_schema(name) or self.latest(name) == schema:
             return None
         version = (self.versions(name) or [0])[-1] + 1 if (self.root / name).is_dir() else 1
         (self.root / name).mkdir(exist_ok=True)
-        (self.root / name / "owner.txt").write_text(owner + "\n")
+        if self.metadata(name) is None:
+            (self.root / name / META_FILE).write_text(yaml.safe_dump({"owner": owner}, sort_keys=False))
         (self.root / name / f"v{version}.json").write_text(json.dumps(schema, indent=2) + "\n")
         return version
+
+
+def registry_type_names(local: Path | None = None, ref: str = DEFAULT_REF) -> set[str]:
+    """schemaRegistry's type names: from a local clone, or its tree through the GitLab API."""
+    if local is not None:
+        return SchemaRegistry(local).types()
+    names, page = set(), "1"
+    while page:
+        url = f"{SCHEMA_REGISTRY_API}/repository/tree?recursive=true&per_page=100&ref={ref}&page={page}"
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                entries, page = json.load(resp), resp.headers.get("X-Next-Page", "")
+        except (urllib.error.URLError, ValueError) as e:
+            raise ConfigError([f"schemaRegistry API {url}: {e}"]) from None
+        names |= {e["path"].split("/")[0] for e in entries
+                  if e["type"] == "blob" and re.fullmatch(rf"[^/]+/{re.escape(META_FILE)}", e["path"])}
+    return names
 
 
 @contextmanager

@@ -46,7 +46,21 @@ def test_publish_versions_and_owner(tmp_path):
     assert registry.publish("Packets", with_props(isp={"type": "string"}), OWNER) == 2
     assert registry.types() == {"Packets"}
     assert registry.owner("Packets") == OWNER
-    assert sorted(f.name for f in (tmp_path / "Packets").iterdir()) == ["owner.txt", "v1.json", "v2.json"]
+    assert sorted(f.name for f in (tmp_path / "Packets").iterdir()) == ["metadata.yaml", "v1.json", "v2.json"]
+    assert (tmp_path / "Packets/metadata.yaml").read_text() == f"owner: {OWNER}\n"
+
+
+def test_ignore_schema(tmp_path):
+    (tmp_path / "Raw").mkdir()
+    (tmp_path / "Raw/metadata.yaml").write_text(f"owner: {OWNER}\nignoreSchema: true\n")
+    (tmp_path / "Stray").mkdir()  # no metadata.yaml: not a type
+    registry = SchemaRegistry(tmp_path)
+    assert registry.types() == {"Raw"}
+    assert registry.ignores_schema("Raw")
+    assert registry.check("Raw", PACKETS, OWNER) == []
+    assert registry.check("Raw", PACKETS, "someone/else") == [f"Raw: owned by {OWNER}, not someone/else"]
+    assert registry.publish("Raw", PACKETS, OWNER) is None
+    assert sorted(f.name for f in (tmp_path / "Raw").iterdir()) == ["metadata.yaml"]
 
 
 def test_check_owner_and_breaking(tmp_path):
@@ -75,3 +89,20 @@ def test_cli(tmp_path):
     assert result.returncode == 1 and "owned by" in result.stdout
     (schemas / "Packets.json").write_text(json.dumps({**PACKETS, "required": []}))
     assert cli("check").returncode == 1
+
+
+def test_cli_ignore_schema_and_no_schemas(tmp_path):
+    schemas, registry = tmp_path / "schemas", tmp_path / "registry"
+    (registry / "Raw").mkdir(parents=True)
+    (registry / "Raw/metadata.yaml").write_text(f"owner: {OWNER}\nignoreSchema: true\n")
+
+    def cli(action, owner=OWNER):
+        return subprocess.run([sys.executable, str(SCRIPT), action, str(schemas), "--owner", owner,
+                               "--registry", str(registry)], capture_output=True, text=True)
+
+    assert "no schemas" in cli("publish").stdout  # no DIR: nothing to do
+    schemas.mkdir()
+    (schemas / "Raw.json").write_text(json.dumps(PACKETS))
+    assert "ignoreSchema, skipped" in cli("publish").stdout
+    assert sorted(f.name for f in (registry / "Raw").iterdir()) == ["metadata.yaml"]
+    assert cli("check", "someone/else").returncode == 1  # owner still checked
