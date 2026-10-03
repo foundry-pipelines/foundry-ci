@@ -8,12 +8,12 @@ A manifest:
                                                     # (group/project), or a URL
     Kafkas:                                         # Input and Output are required
       Input: {Config: kafka/prod, AllowedTypes: [XmlPackets], Topic: raw.xml}
-    Processors:
-      XmlToJsonConverter: {Repo: ..., Ref: main}    # Ref defaults to main; Path: the processor's folder
+    Operators:
+      XmlToJsonConverter: {Repo: ..., Ref: main}    # Ref defaults to main; Path: the operator's folder
     Flow:
-      - Input -> XmlToJsonConverter                 # Kafka -> processor, or processor -> Kafka
+      - Input -> XmlToJsonConverter                 # Kafka -> operator, or operator -> Kafka
 
-A operator.yaml (at the processor's Path, the repo root by default):
+An operator.yaml (at the operator's Path, the repo root by default):
 
     name: Decode
     description: Decodes the base64 payload.
@@ -35,17 +35,16 @@ from pathlib import Path
 import yaml
 
 DEFAULT_REF = "main"
-MANIFEST_KEYS = {"Name", "ConfigRegistry", "Kafkas", "Processors", "Flow"}
+MANIFEST_KEYS = {"Name", "ConfigRegistry", "Kafkas", "Operators", "Flow"}
 KAFKA_KEYS = {"Config", "AllowedTypes", "Topic", "ConnectionSettings"}
 MANDATORY_KAFKAS = ("Input", "Output")
-PROCESSOR_KEYS = {"Repo", "Ref", "Path"}
+OPERATOR_KEYS = {"Repo", "Ref", "Path"}
 DECL_FILE = "operator.yaml"
 DECL_KEYS = {"name", "description", "Runtime", "in", "out"}
 RUNTIMES = ("dotnet", "flink")
 CONNECTION_KEYS = {"Brokers", "SecurityProtocol", "SaslMechanism", "SecretRef"}
 PROFILE_RE = re.compile(r"^kafka/[a-z0-9][a-z0-9._-]*$")
-GITLAB_URL = (os.environ.get("CI_SERVER_URL") or os.environ.get("GITLAB_URL") or "https://gitlab.com").rstrip("/")
-SCHEMA_REGISTRY_REPO = f"{GITLAB_URL}/foundry-platform/registries/schema-registry.git"
+SCHEMA_REGISTRY_REPO = "foundry-platform/registries/schema-registry"
 PROJECT_PATH_RE = re.compile(r"^[\w.-]+(/[\w.-]+)+$")
 META_FILE = "metadata.yaml"
 GENERATED_DIR = ("Models", "In")  # ModelGenerator's classes of input types other operators own
@@ -107,9 +106,29 @@ def types_of(value) -> list[str]:
 
 # --- repos ----------------------------------------------------------------------------------
 
+def gitlab_prefix(url: str | None, origin: str | None) -> str | None:
+    """What a project path is appended to: url (CI_SERVER_URL or GITLAB_URL) if set, else the host of origin,
+    the remote of the repo in the current directory, over the same protocol."""
+    if url:
+        return url.rstrip("/") + "/"
+    if m := re.match(r"^(https?://[^/]+/|[\w.-]+@[\w.-]+:)", origin or ""):
+        return m.group(1)
+    return None
+
+
+def origin() -> str | None:
+    result = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
 def repo_url(repo: str) -> str:
-    """A Repo is a URL, or a project path on this GitLab: group/project -> <GITLAB_URL>/group/project.git."""
-    return f"{GITLAB_URL}/{repo}.git" if PROJECT_PATH_RE.match(repo) else repo
+    """A Repo is a URL, or a project path on this GitLab: group/project -> https://<gitlab>/group/project.git."""
+    if not PROJECT_PATH_RE.match(repo):
+        return repo
+    prefix = gitlab_prefix(os.environ.get("CI_SERVER_URL") or os.environ.get("GITLAB_URL"), origin())
+    if prefix is None:
+        raise ConfigError([f"{repo} is a project path, but this GitLab is unknown: set GITLAB_URL, or run in a clone of a GitLab repo"])
+    return f"{prefix}{repo}.git"
 
 
 def fetch(repo: str, ref: str, dest: Path) -> str:
@@ -138,7 +157,7 @@ def checkout(repo: str, ref: str):
 # --- operator.yaml -------------------------------------------------------------------------
 
 def read_decl(path: Path) -> dict:
-    """A operator.yaml, checked: name, description, Runtime, in and out (non-empty lists of type names)."""
+    """An operator.yaml, checked: name, description, Runtime, in and out (non-empty lists of type names)."""
     if not path.is_file():
         raise ConfigError([f"no {DECL_FILE}"])
     try:
@@ -159,10 +178,10 @@ def read_decl(path: Path) -> dict:
     return decl
 
 
-def processor_decls(manifest: dict) -> tuple[dict[str, dict], dict[str, str], list[str]]:
-    """Each processor's operator.yaml and commit, from its Repo at Ref."""
+def operator_decls(manifest: dict) -> tuple[dict[str, dict], dict[str, str], list[str]]:
+    """Each operator's operator.yaml and commit, from its Repo at Ref."""
     decls, commits, errors = {}, {}, []
-    for name, spec in section(manifest, "Processors").items():
+    for name, spec in section(manifest, "Operators").items():
         if not isinstance(spec, dict) or not spec.get("Repo"):
             continue  # reported by the types validator
         try:
@@ -170,7 +189,7 @@ def processor_decls(manifest: dict) -> tuple[dict[str, dict], dict[str, str], li
                 decls[name] = read_decl(root / str(spec.get("Path") or "").strip("/") / DECL_FILE)
                 commits[name] = commit
         except ConfigError as e:
-            errors += [f"Processors.{name}: {m}" for m in e.errors]
+            errors += [f"Operators.{name}: {m}" for m in e.errors]
     return decls, commits, errors
 
 
@@ -189,7 +208,7 @@ def declared_classes(root: Path, patterns: tuple[str, ...] = ("*.cs", "*.java"))
 
 class SchemaRegistry:
     """The schema-registry repo. A type is a folder <TypeName>/ with a metadata.yaml: owner, the operator that
-    owns and alone publishes it (its repo name, plus /<PROCESSOR_PATH> if set), and ignoreSchema: true for a
+    owns and alone publishes it (its project path, plus /<OPERATOR_PATH> if set), and ignoreSchema: true for a
     type without a JSON Schema (no generation, no breaking-change check; names and wiring are still checked).
     Other types have v1.json..v<N>.json, their schema versions."""
 

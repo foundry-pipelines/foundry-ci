@@ -5,7 +5,7 @@ jsonschema-maven-plugin) against a schema-registry checkout (<Type>/metadata.yam
     python operator/schema/registry.py check DIR --owner OPERATOR --registry SCHEMA_REGISTRY_DIR
     python operator/schema/registry.py publish DIR --owner OPERATOR --registry SCHEMA_REGISTRY_DIR
 
-Both fail if OPERATOR (its repo name, plus /<PROCESSOR_PATH> if set) isn't a type's owner, or a schema
+Both fail if OPERATOR (its project path, plus /<OPERATOR_PATH> if set) isn't a type's owner, or a schema
 breaks its latest version. publish then writes each changed schema as its type's next version; the caller
 commits and pushes the checkout. Types with ignoreSchema: true are skipped past the owner check, and an
 operator whose types all ignore their schema may have no DIR at all.

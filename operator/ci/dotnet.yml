@@ -1,4 +1,4 @@
-# Processor repos include this:
+# Operator repos include this:
 #
 #   include:
 #     - project: foundry-platform/foundry-ci
@@ -8,11 +8,11 @@
 # owns (operator/schema/SchemaGen: NJsonSchema, the System.Text.Json settings the operators serialize with). On merge requests,
 # a breaking change against the latest version in registries/schema-registry fails; on main, changed schemas are
 # committed there as new versions. Either fails if another operator owns the type (owner in <Type>/metadata.yaml); types with ignoreSchema: true are skipped.
-# Builds the processor's $IMAGE_ARCH image with the .NET SDK (no Docker needed) and pushes it as
-# $CI_REGISTRY_IMAGE[/<PROCESSOR_PATH>]:$CI_COMMIT_SHORT_SHA, the image pipeline/deploy/render.py points at.
+# Builds the operator's $IMAGE_ARCH image with the .NET SDK (no Docker needed) and pushes it as
+# $CI_REGISTRY_IMAGE[/<OPERATOR_PATH>]:$CI_COMMIT_SHORT_SHA, the image pipeline/deploy/render.py points at.
 # pipeline-manifests deploys it on its next run.
 variables:
-  PROCESSOR_PATH: ""  # the processor's folder, in a repo holding several
+  OPERATOR_PATH: ""  # the operator's folder, in a repo holding several
   IMAGE_ARCH: arm64  # amd64 or arm64
   DOTNET_BASE_IMAGE: mcr.microsoft.com/dotnet/runtime:8.0
   # Feed with the Foundry packages (foundry-packages's GitLab NuGet registry); empty: the runner's NuGet
@@ -43,7 +43,7 @@ validate:
   script:
     - pip install --quiet pyyaml
     - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/foundry-ci.git /tmp/foundry-ci
-    - python /tmp/foundry-ci/operator/validate/typecheck.py "${PROCESSOR_PATH:-.}"
+    - python /tmp/foundry-ci/operator/validate/typecheck.py "${OPERATOR_PATH:-.}"
 
 schemas:
   extends: .foundry-dotnet
@@ -52,7 +52,7 @@ schemas:
   script:
     - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/foundry-ci.git /tmp/foundry-ci
     - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/registries/schema-registry.git /tmp/schema-registry
-    - DIR=${PROCESSOR_PATH:-.}
+    - DIR=${OPERATOR_PATH:-.}
     - PROJECT=$(ls "$DIR"/*.csproj | head -1)
     - dotnet build "$PROJECT" -c Release -o /tmp/operator
     - dotnet run --project /tmp/foundry-ci/operator/schema/SchemaGen -- "/tmp/operator/$(basename "$PROJECT" .csproj).dll" "$DIR/operator.yaml" schemas /tmp/schema-registry
@@ -73,7 +73,7 @@ schema-check:
     - pip install --quiet pyyaml
     - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/foundry-ci.git /tmp/foundry-ci
     - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/registries/schema-registry.git /tmp/schema-registry
-    - python /tmp/foundry-ci/operator/schema/registry.py check schemas --owner "${CI_PROJECT_PATH##*/}${PROCESSOR_PATH:+/$PROCESSOR_PATH}" --registry /tmp/schema-registry
+    - python /tmp/foundry-ci/operator/schema/registry.py check schemas --owner "${CI_PROJECT_PATH}${OPERATOR_PATH:+/$OPERATOR_PATH}" --registry /tmp/schema-registry
 
 # Commits new schema versions to schema-registry over SSH with its deploy key (SCHEMA_REGISTRY_KEY: base64, a
 # protected group variable, so main only).
@@ -88,7 +88,7 @@ schema-publish:
   script:
     - pip install --quiet pyyaml
     - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/foundry-ci.git /tmp/foundry-ci
-    - OWNER="${CI_PROJECT_PATH##*/}${PROCESSOR_PATH:+/$PROCESSOR_PATH}"
+    - OWNER="${CI_PROJECT_PATH}${OPERATOR_PATH:+/$OPERATOR_PATH}"
     - mkdir -p ~/.ssh && echo "$SCHEMA_REGISTRY_KEY" | base64 -d > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
     - ssh-keyscan -q -p "$CI_SERVER_SHELL_SSH_PORT" "$CI_SERVER_SHELL_SSH_HOST" >> ~/.ssh/known_hosts
     - git clone --quiet "ssh://git@${CI_SERVER_SHELL_SSH_HOST}:${CI_SERVER_SHELL_SSH_PORT}/foundry-platform/registries/schema-registry.git" /tmp/schema-registry
@@ -111,9 +111,9 @@ build-image:
     SDK_CONTAINER_REGISTRY_UNAME: $CI_REGISTRY_USER
     SDK_CONTAINER_REGISTRY_PWORD: $CI_REGISTRY_PASSWORD
   script:
-    - SUFFIX=$(echo "$PROCESSOR_PATH" | tr 'A-Z' 'a-z' | sed -E 's#[^a-z0-9/]+#-#g; s#^/+|/+$##g')
+    - SUFFIX=$(echo "$OPERATOR_PATH" | tr 'A-Z' 'a-z' | sed -E 's#[^a-z0-9/]+#-#g; s#^/+|/+$##g')
     - REPOSITORY=${CI_PROJECT_PATH,,}${SUFFIX:+/$SUFFIX}
     - >
-      dotnet publish "${PROCESSOR_PATH:-.}" -c Release -r linux-${IMAGE_ARCH/amd64/x64} --self-contained false
+      dotnet publish "${OPERATOR_PATH:-.}" -c Release -r linux-${IMAGE_ARCH/amd64/x64} --self-contained false
       -t:PublishContainer -p:EnableSdkContainerSupport=true -p:ContainerUser=1654 -p:ContainerBaseImage=$DOTNET_BASE_IMAGE
       -p:ContainerRegistry=$CI_REGISTRY -p:ContainerRepository=$REPOSITORY -p:ContainerImageTags=$CI_COMMIT_SHORT_SHA

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Renders a pipeline's Kubernetes files: one folder per processor under DIR/Processors/.
+"""Renders a pipeline's Kubernetes files: one folder per operator under DIR/Operators/.
 
     python pipeline/deploy/render.py PipelineManifest.yaml -o DIR [--registry CONFIG_REGISTRY_DIR] [--image-registry HOST]
 
-Run the validators first: this only reports what stops it from rendering. Each processor gets a
-ConfigMap with its appsettings.json (a Foundry section: the pipeline and processor names and the
+Run the validators first: this only reports what stops it from rendering. Each operator gets a
+ConfigMap with its appsettings.json (a Foundry section: the pipeline and operator names and the
 Kafkas it reads and writes, profiles from ConfigRegistry merged in) and, by the Runtime in its
 operator.yaml, a Deployment (dotnet) or a FlinkDeployment (flink). Images are
 <image registry>/<project>[/<path>]:<short sha of Ref>, as operator/ci/dotnet.yml and operator/ci/flink.yml push them; the
@@ -24,10 +24,10 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared"))
-from pipeline import (ConfigError, checkout, flow, load_manifest, load_profile, processor_decls,  # noqa: E402
+from pipeline import (ConfigError, checkout, flow, load_manifest, load_profile, operator_decls,  # noqa: E402
                       repo_url, run, section)
 
-FLINK_VERSION = "v2_2"  # the operator's name for the Flink version operator/ci/flink.yml builds on
+FLINK_VERSION = "v2_2"  # the Flink Kubernetes Operator's name for the Flink version operator/ci/flink.yml builds on
 FLINK_UID = 9999  # the flink user of the official Flink image
 
 
@@ -67,13 +67,13 @@ def kafkas(manifest: dict, registry: Path) -> dict[str, dict]:
     return out
 
 
-def appsettings(manifest: dict, kafkas: dict, processor: str, runtime: str, edges: list, registry_commit: str) -> dict:
+def appsettings(manifest: dict, kafkas: dict, operator: str, runtime: str, edges: list, registry_commit: str) -> dict:
     def kafka(name: str) -> dict:
         return {"Kafka": name, **kafkas[name]}
 
-    ins = [a for a, b in edges if b == processor]
-    outs = [b for a, b in edges if a == processor]
-    foundry = {"Pipeline": manifest["Name"], "Processor": processor, "ConfigRegistryCommit": registry_commit}
+    ins = [a for a, b in edges if b == operator]
+    outs = [b for a, b in edges if a == operator]
+    foundry = {"Pipeline": manifest["Name"], "Operator": operator, "ConfigRegistryCommit": registry_commit}
     if runtime == "flink":
         foundry["Inputs"] = [kafka(k) for k in ins]
     else:
@@ -90,11 +90,11 @@ def image_of(spec: dict, commit: str, image_registry: str) -> str:
     return f"{image_registry}/{path}:{commit[:8]}"
 
 
-def k8s(manifest: dict, kafkas: dict, processor: str, runtime: str, settings: dict, commit: str,
+def k8s(manifest: dict, kafkas: dict, operator: str, runtime: str, settings: dict, commit: str,
         image_registry: str) -> dict[str, dict]:
-    """The Kubernetes files for one processor. No namespace: deploy.sh sets it."""
-    spec = manifest["Processors"][processor]
-    name, text = dns_name(processor), json.dumps(settings, indent=2) + "\n"
+    """The Kubernetes files for one operator. No namespace: deploy.sh sets it."""
+    spec = manifest["Operators"][operator]
+    name, text = dns_name(operator), json.dumps(settings, indent=2) + "\n"
     labels = {"app.kubernetes.io/name": name, "app.kubernetes.io/part-of": dns_name(manifest["Name"])}
     foundry = settings["Foundry"]
     used = [*(foundry.get("Inputs") or [foundry.get("Input")]), foundry["Output"]]
@@ -124,7 +124,7 @@ def k8s(manifest: dict, kafkas: dict, processor: str, runtime: str, settings: di
                         "env": [{"name": "DOTNET_ENVIRONMENT", "value": "Production"}, *env],
                         "resources": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"memory": "256Mi"}},
                         "securityContext": {**container_security, "readOnlyRootFilesystem": True},
-                        # Layered over the image's appsettings.json, so the processor's own settings stay.
+                        # Layered over the image's appsettings.json, so the operator's own settings stay.
                         "volumeMounts": [{"name": "appsettings", "mountPath": "/app/appsettings.Production.json",
                                           "subPath": "appsettings.json", "readOnly": True},
                                          {"name": "tmp", "mountPath": "/tmp"}]}],
@@ -138,7 +138,7 @@ def flink(name: str, labels: dict, annotations: dict, image: str, env: list, con
 
     Kubernetes HA plus upgradeMode last-state: a new image or config restarts the job from its latest
     checkpoint, so windows and other state survive deploys. The job reads its Kafkas from
-    /opt/flink/foundry/appsettings.json, the same Foundry section the .NET processors get.
+    /opt/flink/foundry/appsettings.json, the same Foundry section the .NET operators get.
     """
     meta = {"labels": labels}
     data = f"{name}-state"
@@ -184,16 +184,16 @@ def flink(name: str, labels: dict, annotations: dict, image: str, env: list, con
 
 
 def render(manifest: dict, registry: Path, registry_commit: str, image_registry: str) -> dict[str, dict[str, dict]]:
-    decls, commits, errors = processor_decls(manifest)
+    decls, commits, errors = operator_decls(manifest)
     if errors:
         raise ConfigError(errors)
     resolved = kafkas(manifest, registry)
     edges, _ = flow(manifest)
     out = {}
-    for processor in section(manifest, "Processors"):
-        runtime = decls[processor]["Runtime"]
-        settings = appsettings(manifest, resolved, processor, runtime, edges, registry_commit)
-        out[processor] = k8s(manifest, resolved, processor, runtime, settings, commits[processor], image_registry)
+    for operator in section(manifest, "Operators"):
+        runtime = decls[operator]["Runtime"]
+        settings = appsettings(manifest, resolved, operator, runtime, edges, registry_commit)
+        out[operator] = k8s(manifest, resolved, operator, runtime, settings, commits[operator], image_registry)
     return out
 
 
@@ -215,9 +215,9 @@ def main():
         with checkout(reg["Repo"], reg["Ref"]) as (root, commit):
             rendered = render(manifest, root, commit, args.image_registry)
     # Everything is built before anything is written, so an error leaves no partial output.
-    for processor, files in rendered.items():
+    for operator, files in rendered.items():
         for f, obj in files.items():
-            path = args.output / "Processors" / processor / f
+            path = args.output / "Operators" / operator / f
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(yaml.dump(obj, Dumper=K8sDumper, sort_keys=False))
             print(f"wrote {path}", file=sys.stderr)

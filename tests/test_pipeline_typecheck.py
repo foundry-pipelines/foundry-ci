@@ -18,7 +18,7 @@ def manifest(**kafkas):
             "Output": {"Config": "kafka/prod", "AllowedTypes": ["DecodeEnrichment"], "Topic": "out"},
             **kafkas,
         },
-        "Processors": {"Convert": {"Repo": "a"}, "Decode": {"Repo": "b"}},
+        "Operators": {"Convert": {"Repo": "a"}, "Decode": {"Repo": "b"}},
         "Flow": ["Input -> Convert", "Convert -> Mid", "Mid -> Decode", "Decode -> Output"],
     }
 
@@ -67,9 +67,9 @@ def test_input_type_not_allowed_by_its_kafka(profiles):
 def test_input_type_without_producer(profiles):
     decls = {**DECLS, "Decode": {"Runtime": "dotnet", "in": ["Packets", "EnrichedPackets"], "out": ["DecodeEnrichment"]}}
     errors = typecheck.check(manifest(), decls, REGISTERED, profiles)
-    assert "Decode: reads EnrichedPackets but no processor writes it and Input doesn't allow it" in errors
+    assert "Decode: reads EnrichedPackets but no operator writes it and Input doesn't allow it" in errors
 
 
 def test_input_type_via_input_needs_no_producer(profiles):
     errors = typecheck.check(manifest(), DECLS, REGISTERED, profiles)
-    assert not any("no processor writes it" in e for e in errors)
+    assert not any("no operator writes it" in e for e in errors)
