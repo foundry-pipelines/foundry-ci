@@ -26,12 +26,12 @@ stages: [validate, build, deploy]
 # Clones of this GitLab's projects (internal) authenticate with the job token: the calling project must be on
 # their CI/CD job token allowlists.
 .foundry-git:
-  before_script:
+  before_script: &foundry-git
     - git config --global url."${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/".insteadOf "${CI_SERVER_URL}/"
 
 .foundry-dotnet:
   before_script:
-    - !reference [.foundry-git, before_script]
+    - *foundry-git  # GitLab flattens nested lists
     - >
       if [ -n "$FOUNDRY_NUGET_FEED" ]; then dotnet nuget add source "$FOUNDRY_NUGET_FEED" -n foundry
       -u "$FOUNDRY_NUGET_USER" -p "$FOUNDRY_NUGET_PASSWORD" --store-password-in-clear-text; fi
