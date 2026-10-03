@@ -69,7 +69,7 @@ schema-publish:
     - git clone --quiet git@gitlab.com:foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
     - python /tmp/scripts/schema/registry.py publish schemas --owner "$OWNER" --registry /tmp/schemaRegistry
     - cd /tmp/schemaRegistry && git add -A
-    - if git diff --cached --quiet; then echo "schemaRegistry: nothing new"; exit 0; fi
+    - if git diff --cached --quiet; then echo "schemaRegistry unchanged"; exit 0; fi
     - git -c user.name="Foundry CI" -c user.email="noreply@gitlab.com" commit -qm "$OWNER@$CI_COMMIT_SHORT_SHA" -m "$(git diff --cached --name-only)"
     - |
       for i in 1 2 3; do
