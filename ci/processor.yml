@@ -8,28 +8,50 @@
 # owns (schema/SchemaGen: NJsonSchema, the System.Text.Json settings the operators serialize with). On merge requests,
 # a breaking change against the latest version in common/schemaRegistry fails; on main, changed schemas are
 # committed there as new versions. Either fails if another operator owns the type (owner in <Type>/metadata.yaml); types with ignoreSchema: true are skipped.
-# Builds the processor's arm64 image with the .NET SDK (no Docker needed) and pushes it as
+# Builds the processor's $IMAGE_ARCH image with the .NET SDK (no Docker needed) and pushes it as
 # $CI_REGISTRY_IMAGE[/<PROCESSOR_PATH>]:$CI_COMMIT_SHORT_SHA, the image deploy/render.py points at,
 # then re-renders the pipelines so ones following this branch pick it up.
 variables:
   PROCESSOR_PATH: ""  # the processor's folder, in a repo holding several
+  IMAGE_ARCH: arm64  # amd64 or arm64
+  DOTNET_BASE_IMAGE: mcr.microsoft.com/dotnet/runtime:8.0
+  # Feed with the Foundry.Common packages (foundry-common's GitLab NuGet registry); empty: the runner's NuGet
+  # config already has them. Override all three as group variables for another feed (e.g. Artifactory).
+  FOUNDRY_NUGET_FEED: ${CI_API_V4_URL}/projects/87169966/packages/nuget/index.json
+  FOUNDRY_NUGET_USER: gitlab-ci-token
+  FOUNDRY_NUGET_PASSWORD: $CI_JOB_TOKEN
 
 stages: [validate, build, deploy]
 
+# Clones of this GitLab's projects (internal) authenticate with the job token: the calling project must be on
+# their CI/CD job token allowlists.
+.foundry-git:
+  before_script:
+    - git config --global url."${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/".insteadOf "${CI_SERVER_URL}/"
+
+.foundry-dotnet:
+  before_script:
+    - !reference [.foundry-git, before_script]
+    - >
+      if [ -n "$FOUNDRY_NUGET_FEED" ]; then dotnet nuget add source "$FOUNDRY_NUGET_FEED" -n foundry
+      -u "$FOUNDRY_NUGET_USER" -p "$FOUNDRY_NUGET_PASSWORD" --store-password-in-clear-text; fi
+
 validate:
+  extends: .foundry-git
   stage: validate
   image: python:3.12
   script:
     - pip install --quiet pyyaml
-    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/scripts.git /tmp/scripts
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/scripts.git /tmp/scripts
     - python /tmp/scripts/validators/processors/typecheck.py "${PROCESSOR_PATH:-.}"
 
 schemas:
+  extends: .foundry-dotnet
   stage: validate
   image: mcr.microsoft.com/dotnet/sdk:8.0
   script:
-    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/scripts.git /tmp/scripts
-    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/scripts.git /tmp/scripts
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
     - DIR=${PROCESSOR_PATH:-.}
     - PROJECT=$(ls "$DIR"/*.csproj | head -1)
     - dotnet build "$PROJECT" -c Release -o /tmp/operator
@@ -41,6 +63,7 @@ schemas:
     paths: [schemas/]
 
 schema-check:
+  extends: .foundry-git
   stage: build
   needs: [schemas]
   image: python:3.12
@@ -48,13 +71,14 @@ schema-check:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
   script:
     - pip install --quiet pyyaml
-    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/scripts.git /tmp/scripts
-    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/scripts.git /tmp/scripts
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
     - python /tmp/scripts/schema/registry.py check schemas --owner "${CI_PROJECT_PATH##*/}${PROCESSOR_PATH:+/$PROCESSOR_PATH}" --registry /tmp/schemaRegistry
 
 # Commits new schema versions to schemaRegistry over SSH with its deploy key (SCHEMA_REGISTRY_KEY: base64, a
 # protected group variable, so main only).
 schema-publish:
+  extends: .foundry-git
   stage: build
   needs: [validate, schemas]
   image: python:3.12
@@ -63,15 +87,15 @@ schema-publish:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
     - pip install --quiet pyyaml
-    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/scripts.git /tmp/scripts
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/scripts.git /tmp/scripts
     - OWNER="${CI_PROJECT_PATH##*/}${PROCESSOR_PATH:+/$PROCESSOR_PATH}"
     - mkdir -p ~/.ssh && echo "$SCHEMA_REGISTRY_KEY" | base64 -d > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
-    - ssh-keyscan -q gitlab.com >> ~/.ssh/known_hosts
-    - git clone --quiet git@gitlab.com:foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
+    - ssh-keyscan -q -p "$CI_SERVER_SHELL_SSH_PORT" "$CI_SERVER_SHELL_SSH_HOST" >> ~/.ssh/known_hosts
+    - git clone --quiet "ssh://git@${CI_SERVER_SHELL_SSH_HOST}:${CI_SERVER_SHELL_SSH_PORT}/foundry-platform/common/schemaRegistry.git" /tmp/schemaRegistry
     - python /tmp/scripts/schema/registry.py publish schemas --owner "$OWNER" --registry /tmp/schemaRegistry
     - cd /tmp/schemaRegistry && git add -A
     - if git diff --cached --quiet; then echo "schemaRegistry unchanged"; exit 0; fi
-    - git -c user.name="Foundry CI" -c user.email="noreply@gitlab.com" commit -qm "$OWNER@$CI_COMMIT_SHORT_SHA" -m "$(git diff --cached --name-only)"
+    - git -c user.name="Foundry CI" -c user.email="noreply@${CI_SERVER_HOST}" commit -qm "$OWNER@$CI_COMMIT_SHORT_SHA" -m "$(git diff --cached --name-only)"
     - |
       for i in 1 2 3; do
         git push -q origin HEAD:main && exit 0
@@ -80,6 +104,7 @@ schema-publish:
       exit 1
 
 build-image:
+  extends: .foundry-dotnet
   stage: build
   image: mcr.microsoft.com/dotnet/sdk:8.0
   variables:
@@ -89,8 +114,8 @@ build-image:
     - SUFFIX=$(echo "$PROCESSOR_PATH" | tr 'A-Z' 'a-z' | sed -E 's#[^a-z0-9/]+#-#g; s#^/+|/+$##g')
     - REPOSITORY=${CI_PROJECT_PATH,,}${SUFFIX:+/$SUFFIX}
     - >
-      dotnet publish "${PROCESSOR_PATH:-.}" -c Release -r linux-arm64 --self-contained false
-      -t:PublishContainer -p:EnableSdkContainerSupport=true -p:ContainerUser=1654
+      dotnet publish "${PROCESSOR_PATH:-.}" -c Release -r linux-${IMAGE_ARCH/amd64/x64} --self-contained false
+      -t:PublishContainer -p:EnableSdkContainerSupport=true -p:ContainerUser=1654 -p:ContainerBaseImage=$DOTNET_BASE_IMAGE
       -p:ContainerRegistry=$CI_REGISTRY -p:ContainerRepository=$REPOSITORY -p:ContainerImageTags=$CI_COMMIT_SHORT_SHA
 
 render:

@@ -24,6 +24,7 @@ A operator.yaml (at the processor's Path, the repo root by default):
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -44,8 +45,9 @@ DECL_KEYS = {"name", "description", "Runtime", "in", "out"}
 RUNTIMES = ("dotnet", "flink")
 CONNECTION_KEYS = {"Brokers", "SecurityProtocol", "SaslMechanism", "SecretRef"}
 PROFILE_RE = re.compile(r"^kafka/[a-z0-9][a-z0-9._-]*$")
-SCHEMA_REGISTRY_REPO = "https://gitlab.com/foundry-platform/common/schemaRegistry.git"
-SCHEMA_REGISTRY_API = "https://gitlab.com/api/v4/projects/foundry-platform%2Fcommon%2FschemaRegistry"
+GITLAB_URL = (os.environ.get("CI_SERVER_URL") or os.environ.get("GITLAB_URL") or "https://gitlab.com").rstrip("/")
+SCHEMA_REGISTRY_REPO = f"{GITLAB_URL}/foundry-platform/common/schemaRegistry.git"
+SCHEMA_REGISTRY_API = f"{GITLAB_URL}/api/v4/projects/foundry-platform%2Fcommon%2FschemaRegistry"
 META_FILE = "metadata.yaml"
 GENERATED_DIR = ("Contracts", "In")  # gen-types' classes of input types other operators own
 CLASS_RE = re.compile(r"^\s*(?:(?:public|internal|sealed|abstract|static|partial|final)\s+)*(?:class|record|struct)\s+([A-Za-z_]\w*)", re.M)
@@ -241,7 +243,8 @@ def registry_type_names(local: Path | None = None, ref: str = DEFAULT_REF) -> se
     while page:
         url = f"{SCHEMA_REGISTRY_API}/repository/tree?recursive=true&per_page=100&ref={ref}&page={page}"
         try:
-            with urllib.request.urlopen(url, timeout=30) as resp:
+            token = {"PRIVATE-TOKEN": os.environ["GITLAB_TOKEN"]} if os.environ.get("GITLAB_TOKEN") else {}
+            with urllib.request.urlopen(urllib.request.Request(url, headers=token), timeout=30) as resp:
                 entries, page = json.load(resp), resp.headers.get("X-Next-Page", "")
         except (urllib.error.URLError, ValueError) as e:
             raise ConfigError([f"schemaRegistry API {url}: {e}"]) from None

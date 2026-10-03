@@ -13,8 +13,9 @@ schema:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
     - pip install --quiet pyyaml
-    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/configRegistry.git /tmp/registry
-    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
+    - git config --global url."${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/".insteadOf "${CI_SERVER_URL}/"
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/configRegistry.git /tmp/registry
+    - git clone --quiet --depth 1 ${CI_SERVER_URL}/foundry-platform/common/schemaRegistry.git /tmp/schemaRegistry
     - python ide/manifest_schema.py --registry /tmp/registry --schema-registry /tmp/schemaRegistry -o manifest.schema.json -O operator.schema.json
   artifacts:
     paths: [manifest.schema.json, operator.schema.json]
