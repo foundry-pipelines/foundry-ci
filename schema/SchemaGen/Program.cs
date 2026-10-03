@@ -6,13 +6,11 @@
 // With a schemaRegistry checkout, types it marks ignoreSchema: true are skipped.
 //
 //     dotnet run --project schema/SchemaGen -- OPERATOR_DLL OPERATOR_YAML OUT_DIR [SCHEMA_REGISTRY_DIR]
-using System.Net;
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text.Json;
 using NJsonSchema;
 using NJsonSchema.Generation;
-using NJsonSchema.Generation.TypeMappers;
 using YamlDotNet.RepresentationModel;
 
 if (args.Length is < 3 or > 4)
@@ -23,7 +21,7 @@ if (args.Length is < 3 or > 4)
 var (dll, yamlPath, outDir) = (Path.GetFullPath(args[0]), args[1], args[2]);
 var registry = args.Length == 4 ? args[3] : null;
 
-// The operator's dependencies (Foundry.Common.Serialization, ...) resolve from its build output.
+// The operator's dependencies resolve from its build output.
 var resolver = new AssemblyDependencyResolver(dll);
 AssemblyLoadContext.Default.Resolving += (ctx, name) =>
     resolver.ResolveAssemblyToPath(name) is { } path ? ctx.LoadFromAssemblyPath(path) : null;
@@ -40,11 +38,6 @@ var names = new[] { "in", "out" }
     .Distinct();
 
 var settings = new SystemTextJsonSchemaGeneratorSettings { SerializerOptions = new JsonSerializerOptions() };
-settings.TypeMappers.Add(new PrimitiveTypeMapper(typeof(IPAddress), s =>  // IpAddressJsonConverter: "10.0.0.1", "::1"
-{
-    s.Type = JsonObjectType.String;
-    s.Format = "ip-address";
-}));
 
 Directory.CreateDirectory(outDir);
 var errors = 0;
