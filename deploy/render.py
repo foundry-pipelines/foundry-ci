@@ -25,7 +25,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from pipeline import (ConfigError, checkout, flow, load_manifest, load_profile, processor_decls,  # noqa: E402
-                      run, section)
+                      repo_url, run, section)
 
 FLINK_VERSION = "v2_2"  # the operator's name for the Flink version ci/flink.yml builds on
 FLINK_UID = 9999  # the flink user of the official Flink image
@@ -83,7 +83,7 @@ def appsettings(manifest: dict, kafkas: dict, processor: str, runtime: str, edge
 
 
 def image_of(spec: dict, commit: str, image_registry: str) -> str:
-    m = re.match(r"^https?://[^/]+/(.+?)(\.git)?/?$", spec["Repo"])
+    m = re.match(r"^https?://[^/]+/(.+?)(\.git)?/?$", repo_url(spec["Repo"]))
     if not m:
         raise ConfigError([f"{spec['Repo']}: can only derive images for http(s) repo URLs"])
     path = "/".join(dns_name(p) for p in (m.group(1) + "/" + spec.get("Path", "")).strip("/").split("/"))

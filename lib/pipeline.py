@@ -4,7 +4,8 @@ fetching repos, the connection profiles in configRegistry, and the type schemas 
 A manifest:
 
     Name: EnrichmentPipeline
-    ConfigRegistry: {Repo: ..., Ref: main}          # both required
+    ConfigRegistry: {Repo: ..., Ref: main}          # both required. A Repo is a project path on this GitLab
+                                                    # (group/project), or a URL
     Kafkas:                                         # Input and Output are required
       Input: {Config: kafka/prod, AllowedTypes: [XmlPackets], Topic: raw.xml}
     Processors:
@@ -45,6 +46,7 @@ CONNECTION_KEYS = {"Brokers", "SecurityProtocol", "SaslMechanism", "SecretRef"}
 PROFILE_RE = re.compile(r"^kafka/[a-z0-9][a-z0-9._-]*$")
 GITLAB_URL = (os.environ.get("CI_SERVER_URL") or os.environ.get("GITLAB_URL") or "https://gitlab.com").rstrip("/")
 SCHEMA_REGISTRY_REPO = f"{GITLAB_URL}/foundry-platform/common/schemaRegistry.git"
+PROJECT_PATH_RE = re.compile(r"^[\w.-]+(/[\w.-]+)+$")
 META_FILE = "metadata.yaml"
 GENERATED_DIR = ("Contracts", "In")  # gen-types' classes of input types other operators own
 CLASS_RE = re.compile(r"^\s*(?:(?:public|internal|sealed|abstract|static|partial|final)\s+)*(?:class|record|struct)\s+([A-Za-z_]\w*)", re.M)
@@ -105,8 +107,14 @@ def types_of(value) -> list[str]:
 
 # --- repos ----------------------------------------------------------------------------------
 
+def repo_url(repo: str) -> str:
+    """A Repo is a URL, or a project path on this GitLab: group/project -> <GITLAB_URL>/group/project.git."""
+    return f"{GITLAB_URL}/{repo}.git" if PROJECT_PATH_RE.match(repo) else repo
+
+
 def fetch(repo: str, ref: str, dest: Path) -> str:
     """Check out repo at ref (branch, tag or commit) into dest; return the commit SHA."""
+    repo = repo_url(repo)
     def git(*args):
         return subprocess.run(["git", "-C", str(dest), *args], check=True,
                               capture_output=True, text=True).stdout.strip()
