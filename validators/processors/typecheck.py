@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Checks an operator's operator.yaml: its keys, Runtime, and its types. Each out type is a class
-(C# or Java) of the operator's own project: it owns and registers them. Each in type is one of its own
+(C# or Java) of the operator's own project: it owns and registers them; one with ignoreSchema: true in
+schemaRegistry only has to be registered. Each in type is one of its own
 classes (one arriving via Input) or a type in schemaRegistry. A Maven operator's pom.xml generates
 the schemas of exactly its out types but those with ignoreSchema: true (jsonschema-maven-plugin classNames;
 no plugin if there are none).
@@ -19,8 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
 from pipeline import DECL_FILE, ConfigError, declared_classes, read_decl, run, schema_registry, types_of  # noqa: E402
 
 
-def check(decl: dict, own: set[str], registered: set[str]) -> list[str]:
-    errors = [f"{DECL_FILE} out: {t!r} is not a class of this project" for t in types_of(decl["out"]) if t not in own]
+def check(decl: dict, own: set[str], registered: set[str], ignored: set[str] = frozenset()) -> list[str]:
+    """ignored: registered types with ignoreSchema: true, which need no class."""
+    errors = [f"{DECL_FILE} out: {t!r} is not a class of this project" for t in types_of(decl["out"])
+              if t not in own and t not in ignored]
     errors += [f"{DECL_FILE} in: {t!r} is neither a class of this project nor in schemaRegistry"
                for t in types_of(decl["in"]) if t not in own | registered]
     return errors
@@ -69,7 +72,7 @@ def main():
             errors += [f"{d}: {m}" for m in e.errors]
             continue
         try:
-            found = check(decl, declared_classes(d), registered) + check_pom(decl, d / "pom.xml", ignored)
+            found = check(decl, declared_classes(d), registered, ignored) + check_pom(decl, d / "pom.xml", ignored)
         except ConfigError as e:
             found = e.errors
         found = [f"{d}: {m}" for m in found]

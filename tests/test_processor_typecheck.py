@@ -82,3 +82,8 @@ def test_pom_skips_ignored_types(tmp_path):
 def test_pom_needs_no_plugin_when_all_ignored(tmp_path):
     (tmp_path / "pom.xml").write_text('<project xmlns="http://maven.apache.org/POM/4.0.0"/>')
     assert typecheck.check_pom({"out": ["EnrichedPackets"]}, tmp_path / "pom.xml", {"EnrichedPackets"}) == []
+
+
+def test_ignored_out_types_need_no_class():
+    decl = {"in": ["Packets"], "out": ["EnrichedPackets"]}
+    assert typecheck.check(decl, set(), {"Packets", "EnrichedPackets"}, {"EnrichedPackets"}) == []
