@@ -10,8 +10,8 @@
 - Flow connects a Kafka to a processor or a processor to a Kafka, between things the manifest defines,
   and everything it defines is connected. Nothing writes Input.
 - A processor reads every type its input Kafkas allow (in), and each type it reads comes from one of
-  them. Each type it writes (out) is allowed by one of its output Kafkas, and each output Kafka allows
-  one of them.
+  them. Its output Kafka allows every type it writes (out), and each type a Kafka allows is written
+  there by one of its writers.
 - dotnet processors read one Kafka; every processor writes one.
 """
 
@@ -78,26 +78,24 @@ def check(manifest: dict, decls: dict[str, dict], models: set[str]) -> list[str]
         decl = decls.get(name)
         if decl is None:
             continue  # no processor.yaml: reported by processor_decls
-        ins, outs = set(types_of(decl["in"])), set(types_of(decl["out"]))
+        ins, outs = set(types_of(decl.get("in"))), set(types_of(decl.get("out")))
         if not reads[name]:
             errors.append(f"{name}: reads no Kafka")
-        if decl["Runtime"] == "dotnet" and len(reads[name]) > 1:
+        if decl.get("Runtime", "dotnet") == "dotnet" and len(reads[name]) > 1:
             errors.append(f"{name}: a dotnet processor reads one Kafka, not {', '.join(reads[name])}")
         if len(writes[name]) != 1:
             errors.append(f"{name}: writes {len(writes[name])} Kafkas ({', '.join(writes[name]) or 'none'}), needs one")
         for k in reads[name]:
             if extra := allowed.get(k, set()) - ins:
-                errors.append(f"{name}: {k} allows {', '.join(sorted(extra))} but {name} reads {', '.join(sorted(ins))}")
+                errors.append(f"Flow: {k} -> {name}: {k} allows {', '.join(sorted(extra))} but {name} reads {', '.join(sorted(ins))}")
         if reads[name] and (unread := ins - set().union(*(allowed.get(k, set()) for k in reads[name]))):
             errors.append(f"{name}: reads {', '.join(sorted(unread))} but none of {', '.join(reads[name])} allows it")
         for k in writes[name]:
-            if not outs & allowed.get(k, set()):
-                errors.append(f"{name}: writes {', '.join(sorted(outs))} but {k} allows {', '.join(sorted(allowed.get(k, ()))) or 'nothing'}")
-        if writes[name] and (homeless := outs - set().union(*(allowed.get(k, set()) for k in writes[name]))):
-            errors.append(f"{name}: writes {', '.join(sorted(homeless))} but none of {', '.join(writes[name])} allows it")
+            if extra := outs - allowed.get(k, set()):
+                errors.append(f"Flow: {name} -> {k}: {name} writes {', '.join(sorted(extra))} but {k} allows {', '.join(sorted(allowed.get(k, ()))) or 'nothing'}")
     for k in kafkas:
         writers = [p for p, w in writes.items() if k in w and p in decls]
-        if k != "Input" and writers and (unwritten := allowed[k] - {t for p in writers for t in types_of(decls[p]["out"])}):
+        if k != "Input" and writers and (unwritten := allowed[k] - {t for p in writers for t in types_of(decls[p].get("out"))}):
             errors.append(f"Kafkas.{k}: allows {', '.join(sorted(unwritten))} but nothing writes it there")
     return errors
 
