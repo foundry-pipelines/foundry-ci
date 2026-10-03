@@ -4,11 +4,21 @@
 #     - project: foundry-platform/common/scripts
 #       file: ci/processor.yml
 #
-# Builds the processor's arm64 image with the .NET SDK (no Docker needed) and pushes it as
-# $CI_REGISTRY_IMAGE[/<PROCESSOR_PATH>]:$CI_COMMIT_SHORT_SHA, the image manifest.py k8s points at,
+# Checks processor.yaml (validators/processors/types.py), builds the processor's arm64 image with the .NET SDK (no Docker needed) and pushes it as
+# $CI_REGISTRY_IMAGE[/<PROCESSOR_PATH>]:$CI_COMMIT_SHORT_SHA, the image deploy/render.py points at,
 # then re-renders the pipelines so ones following this branch pick it up.
 variables:
   PROCESSOR_PATH: ""  # the processor's folder, in a repo holding several
+
+stages: [validate, build, deploy]
+
+validate:
+  stage: validate
+  image: python:3.12
+  script:
+    - pip install --quiet pyyaml
+    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/scripts.git /tmp/scripts
+    - python /tmp/scripts/validators/processors/types.py "${PROCESSOR_PATH:-.}"
 
 build-image:
   stage: build
@@ -28,8 +38,8 @@ render:
   stage: deploy
   needs: [build-image]
   inherit:
-    variables: false  # foundry-pipelines doesn't accept pipeline variables
+    variables: false  # pipelines doesn't accept pipeline variables
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   trigger:
-    project: foundry-platform/foundry-pipelines
+    project: foundry-platform/pipelines

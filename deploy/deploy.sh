@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Applies rendered pipelines (manifest.py k8s output) to the current kubectl context:
+# Applies rendered pipelines (deploy/render.py output) to the current kubectl context:
 #
 #   deploy.sh DIR...    e.g. deploy.sh out/PacketPipeline
 #

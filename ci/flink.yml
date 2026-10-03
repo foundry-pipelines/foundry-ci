@@ -4,14 +4,22 @@
 #     - project: foundry-platform/common/scripts
 #       file: ci/flink.yml
 #
-# Builds the job jar (Gradle, `shadowJar` producing build/libs/job.jar) and pushes an arm64 image of the
+# Checks processor.yaml (validators/processors/types.py), builds the job jar (Gradle, `shadowJar` producing build/libs/job.jar) and pushes an arm64 image of the
 # official Flink image plus that jar at /opt/flink/usrlib/job.jar, as $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
-# (what manifest.py k8s points a FlinkDeployment at); then re-renders and deploys the pipelines.
+# (what deploy/render.py points a FlinkDeployment at); then re-renders and deploys the pipelines.
 # crane appends the jar as one layer, so no Docker daemon and no emulation are needed.
 variables:
-  FLINK_IMAGE: flink:2.2.1-java21  # keep in step with FLINK_VERSION in manifest.py
+  FLINK_IMAGE: flink:2.2.1-java21  # keep in step with FLINK_VERSION in deploy/render.py
 
-stages: [build, image, deploy]
+stages: [validate, build, image, deploy]
+
+validate:
+  stage: validate
+  image: python:3.12
+  script:
+    - pip install --quiet pyyaml
+    - git clone --quiet --depth 1 https://gitlab.com/foundry-platform/common/scripts.git /tmp/scripts
+    - python /tmp/scripts/validators/processors/types.py "${PROCESSOR_PATH:-.}"
 
 build-jar:
   stage: build
@@ -39,6 +47,6 @@ render:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   inherit:
-    variables: false  # foundry-pipelines doesn't accept pipeline variables
+    variables: false  # pipelines doesn't accept pipeline variables
   trigger:
-    project: foundry-platform/foundry-pipelines
+    project: foundry-platform/pipelines

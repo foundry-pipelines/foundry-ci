@@ -1,48 +1,41 @@
 # scripts
 
-Shared tooling for Foundry pipelines.
+Shared tooling for Foundry pipelines. Python 3 with `pyyaml`; everything that needs a repo clones it.
 
-## manifest/
-
-`manifest.py` works with `PipelineManifest.yaml` files and the connection profiles in [configs](https://gitlab.com/foundry-platform/common/configs). Needs `pyyaml`.
+## validators/
 
 ```sh
-python manifest/manifest.py schema --configs ../configs    # print the IDE schema
-python manifest/manifest.py render PipelineManifest.yaml   # print a manifest with profiles merged in
+python validators/pipelines/cycles.py PipelineManifest.yaml   # Flow has no cycle
+python validators/pipelines/types.py PipelineManifest.yaml    # Kafkas, Processors and Flow line up by type
+python validators/processors/types.py [PROCESSOR_DIR]         # processor.yaml's types are C# classes
 ```
 
-`render` clones `Configs.Repo` at `Configs.Ref`; add `--configs DIR` to use a local checkout.
+Types are names of C# classes: the ones in [Foundry.Common.Models](https://gitlab.com/foundry-platform/common/foundry-common) (or, for a processor, its own project). Nothing checks the shape of the data. `--models DIR` uses a local foundry-common checkout instead of cloning it. `pipelines` CI runs the pipeline validators; `ci/processor.yml` and `ci/flink.yml` run the processor one.
 
-### Validating a manifest
-
-```sh
-python manifest/manifest.py validate PipelineManifest.yaml
-```
-
-Checks that the datasets have a `Type` and `Topic`, that every profile exists, and that every `DataSchema` is a schema in the configs repo's `schemas/` or `Any`. `Any`, like leaving `DataSchema` out (or `in`/`out` in a `processor.yaml`), means no schema: it matches every processor. Each processor must have a `Repo` and read (`In`) and write (`Out`) existing datasets, and those datasets must carry the schemas declared in the processor's `processor.yaml` at its `Ref`. Processors may not form a cycle. It clones what it needs; `--configs DIR` uses a local checkout instead, and `--no-processors` skips the `processor.yaml` checks. Foundry Studio imports the same `check()`.
-
-A processor declares its schemas in a `processor.yaml` at its `Path` (the repo root by default):
+A processor reads every type its input Kafkas allow, and each type it writes must be allowed by its output Kafka. dotnet processors read one Kafka, flink ones any number; every processor writes one.
 
 ```yaml
-name: Isp
-in: Packets
-out: EnrichedPackets
-description: Adds the ISP of host_ip.
+# processor.yaml, at the repo root (or the processor's Path)
+name: Decode
+description: Decodes the base64 payload.
+Runtime: dotnet   # dotnet | flink
+
+in: [Packets]
+out: [DecodeEnrichment]
 ```
 
-### appsettings.json for processors
+## deploy/
 
-```sh
-python manifest/manifest.py appsettings PipelineManifest.yaml --processor Isp -o appsettings.json
-python manifest/manifest.py appsettings PipelineManifest.yaml -o out/   # out/<processor>/appsettings.json, one per processor
-```
+`render.py PipelineManifest.yaml -o DIR` writes each processor's Kubernetes files (a ConfigMap with its `appsettings.json`, and a Deployment or a FlinkDeployment by `Runtime`); `deploy.sh DIR...` applies them, one namespace per pipeline folder. Processors read `Foundry:Input` (flink: `Foundry:Inputs`) and `Foundry:Output`, each with `Topic`, `AllowedTypes` and `ConnectionSettings` (the `Config` profile from [configRegistry](https://gitlab.com/foundry-platform/common/configRegistry) merged in).
 
-Writes a `Foundry` section with the pipeline and processor names and the processor's `In` and `Out` datasets (topic, schema and connection settings, profiles merged in). `k8s` mounts it as a .NET processor's `appsettings.Production.json`, over the `appsettings.json` its build generated from `metasettings.json` ([Foundry.Common.Configuration](https://gitlab.com/foundry-platform/common/foundry-common)); a processor reads `Foundry:Input` and `Foundry:Output`.
+## ide/
 
-### IDE autocomplete
-
-Every push to `main` here or in `configs` regenerates the schema, so `Config:` autocompletes the current profiles. Put this at the top of a `PipelineManifest.yaml` (YAML extension in VS Code, or JetBrains):
+`manifest_schema.py --registry DIR` writes the JSON Schema IDEs autocomplete manifests with. CI publishes it on every push to `main` here, in configRegistry and in foundry-common:
 
 ```yaml
 # yaml-language-server: $schema=https://gitlab.com/foundry-platform/common/scripts/-/jobs/artifacts/main/raw/manifest.schema.json?job=schema
 ```
+
+## lib/
+
+`pipeline.py`: what the scripts above share.
